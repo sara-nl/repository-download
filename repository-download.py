@@ -106,7 +106,7 @@ class DownloadManager(object):
         self.options = {}
         self.request = None
         self.rdata = ""
-        self.stageObjects = []
+        self.stageObjects = {}
         self.statusObjects = {}
 
         requests.packages.urllib3.disable_warnings()
@@ -255,10 +255,23 @@ class DownloadManager(object):
     # report
     def report(self):
         finished = filter(lambda x: x['dstatus'] == FileStatus.FINISHED, self.files.values())
-        print "Finished (%d): %s" % (len(finished), map(lambda x: x['name'], finished))
+
+        counts = {}
+        for f in finished:
+            if not f['parent'] in counts.keys():
+                counts[f['parent']] = 0
+            counts[f['parent']] += 1
+
+        print "Finished (%d objects, %d files): %s" % (len(counts), sum(i for _,i in counts.items()), ", ".join(map(lambda x: "%s (%s)" % x, counts.items())))
 
         errors = filter(lambda x: x['dstatus'] == FileStatus.ERROR, self.files.values())
-        print "Errors (%d): %s" % (len(errors), map(lambda x: x['name'], errors))
+
+        counts = {}
+        for f in errors:
+            if not f['parent'] in counts.keys():
+                counts[f['parent']] = 0
+            counts[f['parent']] += 1
+        print "Errors (%d objects, %d files): %s" % (len(counts), sum(i for _,i in counts.items()), ", ".join(map(lambda x: "%s (%s)" % x, counts.items())))
 
     # initiate download and stage processes
     def startProcesses(self):
@@ -273,18 +286,41 @@ class DownloadManager(object):
     def _processStaging(self):
         for (i, f) in enumerate(self.files.itervalues()):
             if f['dstatus'] == FileStatus.STAGE:
-                if self._stageDeposit(f['parent']):
-                    f['dstatus'] = FileStatus.STAGING
-                else:
+                # check if deposit has already been staged recently
+                if not f['parent'] in self.stageObjects.keys() or time.time() - self.stageObjects[f['parent']]['updated'] > self.options['stage-interval']:
+                    self._stageDeposit(f['parent'])
+
+                if not self._processStageRequest(f):
                     f['dstatus'] = FileStatus.ERROR
             elif f['dstatus'] == FileStatus.STAGING:
-                # check if deposit has already been check for status recently
+                # check if deposit has already been checked for status recently
                 if not f['parent'] in self.statusObjects.keys() or time.time() - self.statusObjects[f['parent']]['updated'] > self.options['status-interval']:
                     self._statusDeposit(f['parent'], f['id'])
 
                 # check if status has changed
                 if not self._processStatusCheck(f):
                     f['dstatus'] = FileStatus.ERROR
+
+        time.sleep(1)
+
+    def _processStageRequest(self, fileObject):
+        # if status has been found
+        if not fileObject['parent'] in self.stageObjects or not self.stageObjects[fileObject['parent']]['result']:
+            return False
+        if 'stage_requested' in fileObject and time.time() - fileObject['stage_requested'] <= self.options['stage-interval']:
+            return True
+
+        debug(' Check stage request for file %s' % fileObject['name'])
+
+        # find file ID in result and check stage result
+        for f in self.stageObjects[fileObject['parent']]['result']:
+            if f['id'] == fileObject['id']:
+                if f['status'] in STATUS_STAGING:
+                    f['dstatus'] = FileStatus.STAGING
+
+        fileObject['stage_requested'] = time.time()
+
+        return True
 
     def _processStatusCheck(self, fileObject):
         # if status has been found
@@ -320,6 +356,44 @@ class DownloadManager(object):
                     f['dstatus'] = FileStatus.FINISHED
                 else:
                     f['dstatus'] = FileStatus.ERROR
+
+    def _stageDeposit(self, pid):
+        if len(self.stageObjects) >= self.options['stage-max-count']:
+            debug('maximum number of stage requests exceeded')
+            return False
+
+        print 'Staging %s' % pid
+
+        pids = pid.split(':')
+        success = self._requestAuthenticated(TDR_API_STAGE % (pids[0], pids[1]))
+
+        # add to stage cache
+        self.stageObjects.update({pid: {'updated': time.time(), 'result': None}})
+
+        if not success:
+            error('object staging of %s failed (%s): %s' % (pid, self.request.status_code, self.rdata['error']))
+            return False
+
+        self.stageObjects[pid][result] = self.rdata
+
+        return True
+
+    def _statusDeposit(self, pid, fileID=None):
+        print 'Status %s' % pid
+
+        pids = pid.split(':')
+        success = self._requestAuthenticated(TDR_API_STATUS % (pids[0], pids[1]))
+
+        # add to status cache
+        self.statusObjects.update({pid: {'updated': time.time(), 'result': None}})
+
+        if not success:
+            error('object status of %s failed (%s): %s' % (pid, self.request.status_code, self.rdata['error']))
+            return False
+
+        self.statusObjects[pid][result] = self.rdata
+
+        return True
 
     # download a file and compare the checksum
     def _downloadFile(self, fileObject):
@@ -361,9 +435,9 @@ class DownloadManager(object):
                 # print progress
                 progress = "(%d%%, %s, %s/s)" % (totsize * 100. / filesize, bytesize(totsize), bytesize(int(size / elapsed))) if filesize else ""
                 if totsize == filesize:
-                    sys.stdout.write("\rFile %s downloaded %s" % (fileObject['name'], progress))
+                    sys.stdout.write("\rFile %s of %s downloaded %s" % (fileObject['name'], fileObject['parent'], progress))
                 else:
-                    sys.stdout.write("\rDownloading file %s %s" % (fileObject['name'], progress))
+                    sys.stdout.write("\rDownloading file %s of %s %s" % (fileObject['name'], fileObject['parent'], progress))
                 sys.stdout.flush()
 
             sys.stdout.write('\n')
@@ -372,8 +446,8 @@ class DownloadManager(object):
 
     # check the checksum of a downloaded file
     def _checksumFile(self, fileObject):
-        text = "Comparing local checksum of file '%s'"
-        sys.stdout.write(text % fileObject['name'])
+        text = "Comparing local checksum of object %s file '%s'"
+        sys.stdout.write(text % (fileObject['parent'], fileObject['name']))
 
         # calculate the local checksum
         try:
@@ -383,9 +457,9 @@ class DownloadManager(object):
 
         # compare with retrieved checksum
         if output == fileObject['md5']:
-            sys.stdout.write("\r" + text % fileObject['name'] + " PASS")
+            sys.stdout.write("\r" + text % (fileObject['parent'], fileObject['name']) + " PASS")
         else:
-            sys.stdout.write("\r" + text % fileObject['name'] + " FAIL (%s vs %s)" % (output, fileObject['md5']))
+            sys.stdout.write("\r" + text % (fileObject['parent'], fileObject['name']) + " FAIL (%s vs %s)" % (output, fileObject['md5']))
 
         # store checksum if requested
         if self.options['store-checksum']:
@@ -396,37 +470,6 @@ class DownloadManager(object):
         sys.stdout.write('\n')
 
         return output == fileObject['md5']
-
-    def _stageDeposit(self, pid):
-        # check if deposit has already been staged
-        if pid in self.stageObjects:
-            return True
-
-        print 'Staging %s' % pid
-
-        # request stage
-        pids = pid.split(':')
-        success = self._requestAuthenticated(TDR_API_STAGE % (pids[0], pids[1]))
-        if not success:
-            error('object staging of %s failed (%s): %s' % (pid, self.request.status_code, self.rdata['error']))
-            return False
-
-        self.stageObjects.append(pid)
-
-        return True
-
-    def _statusDeposit(self, pid, fileID=None):
-        print 'Status %s' % pid
-
-        pids = pid.split(':')
-        success = self._requestAuthenticated(TDR_API_STATUS % (pids[0], pids[1]))
-        if not success:
-            error('object status of %s failed (%s): %s' % (pid, self.request.status_code, self.rdata['error']))
-            return False
-
-        self.statusObjects.update({pid: {'updated': time.time(), 'result': self.rdata}})
-
-        return True
 
 def bools(b):
     return "yes" if b else "no"
@@ -455,6 +498,8 @@ def main(argv):
         'check-checksum': True,
         'store-checksum': False,
         'status-interval': 30,
+        'stage-interval': 60,
+        'stage-max-count': 10,
         'favourites': False,
         'outputdir': "download",
         'target': BASE_URL,
