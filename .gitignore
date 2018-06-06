@@ -1,5 +1,4 @@
-download/
+download/*
 *.txt
-*.png
-*.pdf
 .DS_Store
+

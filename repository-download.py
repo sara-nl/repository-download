@@ -7,6 +7,7 @@ class Config:
     QUIET = False
     DRYRUN = False
     BUFFER_SIZE = 1024 * 1024
+    BASE_URL = 'https://tdr-devel.surfsara.nl'
 
 def message(msg, mtype = 'debug', showstack = False):
     ''' Print message'''
@@ -24,7 +25,7 @@ def message(msg, mtype = 'debug', showstack = False):
         elif mtype == 'notice':
             sys.stderr.write('\x1b[30m')
         elif mtype == 'verbose':
-            sys.stderr.write('\x1b[29m')
+            sys.stderr.write('\x1b[33m')
 
     if Config.DEBUG:
         frames = inspect.stack()
@@ -55,7 +56,7 @@ def verbose(msg):
     message(msg, 'verbose')
 
 try:
-    import sys, os, getopt, requests, inspect, traceback, pprint, copy, cchardet, re, time, math, json, subprocess
+    import sys, os, getopt, requests, inspect, traceback, pprint, copy, cchardet, re, time, math, simplejson, subprocess
 except Exception, e:
     error(e, True, 100)
 
@@ -68,8 +69,6 @@ TDR_API_FAVOURITES = 'api/favourites'
 TDR_API_OBJECTS = 'api/objects/%s'
 TDR_API_STATUS = 'api/objects/%s/%s/status'
 TDR_API_STAGE = 'api/objects/%s/%s/stage'
-
-BASE_URL = 'https://tdr-image.surfsara.nl'
 
 STATUS_ONLINE = ['REG', 'DUL']
 STATUS_OFFLINE = ['OFL', 'MIG']
@@ -88,6 +87,7 @@ class FileStatus:
     CHECKSUM = 5
     CHECKSUMMING = 6
     FINISHED = 7
+    SKIP = 254
     ERROR = 255
 
 class FileObject(object):
@@ -139,12 +139,12 @@ class DownloadManager(object):
             self.downloadFavourites()
 
     def downloadBasket(self):
-        self.objects = self._requestAuthenticated(TDR_API_BASKET)
+        self.objects = self._requestAuthenticated('GET', TDR_API_BASKET)
 
         verbose(self.objects)
 
     def downloadFavourites(self):
-        self.objects = self._requestAuthenticated(TDR_API_FAVOURITES)
+        self.objects = self._requestAuthenticated('GET', TDR_API_FAVOURITES)
 
         verbose(self.objects)
 
@@ -152,13 +152,17 @@ class DownloadManager(object):
         pids = pid.split(':')
         return self._request(TDR_API_STATUS % (pids[0], pids[1]))
 
-    def _requestAuthenticated(self, endpoint, headers={}, params={}):
+    def _requestAuthenticated(self, method, endpoint, headers={}, params={}):
         params['token'] = self.token
-        return self._request(endpoint, headers, params)
+        return self._request(endpoint, headers, params, method=method)
 
     def _request(self, uri, headers={}, params={}, method='GET'):
         url = "%s/%s" % (self.options['target'], uri) if self.options['target'] not in uri else uri
-        self.request = requests.request(method, url, headers=headers, params=params, verify=self.options['verify'])
+
+        try:
+            self.request = requests.request(method, url, headers=headers, params=params, verify=self.options['verify'])
+        except requests.exceptions.SSLError, e:
+            error(e.message, True, 2)
 
         debug("%s %s" % (method, self.request.url))
 
@@ -169,10 +173,15 @@ class DownloadManager(object):
         if self.request.encoding is None:
             self.request.encoding = cchardet.detect(self.request.content)['encoding']
 
+        verbose("%s %s" % (self.request.status_code, self.request.text))
+
         if 'content-type' in self.request.headers:
             ct = re.search('([a-z]+\/[a-z]+)', self.request.headers['content-type'], re.I)
             if ct.group(1) in ['application/json', 'text/json']:
-                self.rdata = self.request.json() if self.request.text > "" else {}
+                try:
+                    self.rdata = self.request.json() if self.request.text > "" else {}
+                except simplejson.errors.JSONDecodeError, e:
+                    error("internal JSON decode error: %s" % e.message, True, 2)
             else:
                 self.rdata = self.request.text
 
@@ -239,9 +248,9 @@ class DownloadManager(object):
                     if fileID and f['id'] != fileID:
                         continue
                     if f['status'] in STATUS_OFFLINE:
-                        f['dstatus'] = FileStatus.STAGE
+                        f['dstatus'] = FileStatus.STAGE if not self.options['skip-staging'] else FileStatus.SKIP
                     else:
-                        f['dstatus'] = FileStatus.DOWNLOAD
+                        f['dstatus'] = FileStatus.DOWNLOAD if not self.options['skip-download'] else FileStatus.SKIP
 
                     f['parent'] = pid
 
@@ -262,7 +271,11 @@ class DownloadManager(object):
                 counts[f['parent']] = 0
             counts[f['parent']] += 1
 
-        print "Finished (%d objects, %d files): %s" % (len(counts), sum(i for _,i in counts.items()), ", ".join(map(lambda x: "%s (%s)" % x, counts.items())))
+        # report if any objects
+        if len(counts) > 0:
+            print "Finished (%d objects, %d files): %s" % (len(counts), sum(i for _,i in counts.items()), ", ".join(map(lambda x: "%s (%s)" % x, counts.items())))
+        else:
+            print "None finished"
 
         errors = filter(lambda x: x['dstatus'] == FileStatus.ERROR, self.files.values())
 
@@ -271,11 +284,16 @@ class DownloadManager(object):
             if not f['parent'] in counts.keys():
                 counts[f['parent']] = 0
             counts[f['parent']] += 1
-        print "Errors (%d objects, %d files): %s" % (len(counts), sum(i for _,i in counts.items()), ", ".join(map(lambda x: "%s (%s)" % x, counts.items())))
+
+        # report if any errors
+        if len(counts) > 0:
+            print "Errors (%d objects, %d files): %s" % (len(counts), sum(i for _,i in counts.items()), ", ".join(map(lambda x: "%s (%s)" % x, counts.items())))
+        else:
+            print "No errors"
 
     # initiate download and stage processes
     def startProcesses(self):
-        while len(filter(lambda x: not x['dstatus'] in [FileStatus.FINISHED, FileStatus.ERROR], self.files.values())) > 0:
+        while len(filter(lambda x: not x['dstatus'] in [FileStatus.FINISHED, FileStatus.ERROR, FileStatus.SKIP], self.files.values())) > 0:
             if len(filter(lambda x: x['dstatus'] in [FileStatus.STAGE, FileStatus.STAGING], self.files.values())) > 0:
                 self._processStaging()
             if len(filter(lambda x: x['dstatus'] == FileStatus.DOWNLOAD, self.files.values())) > 0:
@@ -283,6 +301,7 @@ class DownloadManager(object):
             if len(filter(lambda x: x['dstatus'] == FileStatus.CHECKSUM, self.files.values())) > 0:
                 self._processChecksums()
 
+    # process all files and objects to be staged
     def _processStaging(self):
         for (i, f) in enumerate(self.files.itervalues()):
             if f['dstatus'] == FileStatus.STAGE:
@@ -304,28 +323,29 @@ class DownloadManager(object):
         time.sleep(1)
 
     def _processStageRequest(self, fileObject):
-        # if status has been found
+        # if no status has been found
         if not fileObject['parent'] in self.stageObjects or not self.stageObjects[fileObject['parent']]['result']:
             return False
+        # check when last attempt was made
         if 'stage_requested' in fileObject and time.time() - fileObject['stage_requested'] <= self.options['stage-interval']:
             return True
 
         debug(' Check stage request for file %s' % fileObject['name'])
 
-        # find file ID in result and check stage result
-        for f in self.stageObjects[fileObject['parent']]['result']:
-            if f['id'] == fileObject['id']:
-                if f['status'] in STATUS_STAGING:
-                    f['dstatus'] = FileStatus.STAGING
+        # check stage result
+        if self.stageObjects[fileObject['parent']]['result']['code'] == '200':
+            if fileObject['status'] in STATUS_STAGING:
+                fileObject['dstatus'] = FileStatus.STAGING
 
         fileObject['stage_requested'] = time.time()
 
         return True
 
     def _processStatusCheck(self, fileObject):
-        # if status has been found
+        # if no status has been found
         if not fileObject['parent'] in self.statusObjects or not self.statusObjects[fileObject['parent']]['result']:
             return False
+        # check when last attempt was made
         if 'status_checked' in fileObject and time.time() - fileObject['status_checked'] <= self.options['status-interval']:
             return True
 
@@ -345,7 +365,7 @@ class DownloadManager(object):
         for (i, f) in enumerate(self.files.itervalues()):
             if f['dstatus'] == FileStatus.DOWNLOAD:
                 if self._downloadFile(f):
-                    f['dstatus'] = FileStatus.CHECKSUM
+                    f['dstatus'] = FileStatus.CHECKSUM if not self.options['skip-checksum'] else FileStatus.SKIP
                 else:
                     f['dstatus'] = FileStatus.ERROR
 
@@ -365,7 +385,7 @@ class DownloadManager(object):
         print 'Staging %s' % pid
 
         pids = pid.split(':')
-        success = self._requestAuthenticated(TDR_API_STAGE % (pids[0], pids[1]))
+        success = self._requestAuthenticated('POST', TDR_API_STAGE % (pids[0], pids[1]))
 
         # add to stage cache
         self.stageObjects.update({pid: {'updated': time.time(), 'result': None}})
@@ -374,7 +394,7 @@ class DownloadManager(object):
             error('object staging of %s failed (%s): %s' % (pid, self.request.status_code, self.rdata['error']))
             return False
 
-        self.stageObjects[pid][result] = self.rdata
+        self.stageObjects[pid]['result'] = self.rdata
 
         return True
 
@@ -391,14 +411,31 @@ class DownloadManager(object):
             error('object status of %s failed (%s): %s' % (pid, self.request.status_code, self.rdata['error']))
             return False
 
-        self.statusObjects[pid][result] = self.rdata
+        print self.rdata
+        self.statusObjects[pid]['result'] = self.rdata
 
         return True
 
     # download a file and compare the checksum
+    # if the target file exists, compare size and checksum
     def _downloadFile(self, fileObject):
+        # define the target output dir
+        targetdir = "%s/%s" % (self.options['outputdir'], fileObject['parent'].replace(':', '/'))
+        fileObject['target'] = "%s/%s" % (targetdir, fileObject['name'])
+
+        # check if file is present
+        if not self.options['force-overwrite'] and os.path.exists(fileObject['target']):
+            # compare size, if equal return
+            filesize = os.path.getsize(fileObject['target'])
+            if filesize == int(fileObject['size']):
+                print "File %s of %s already downloaded" % (fileObject['name'], fileObject['parent'])
+                return True
+
         # request streaming data
-        self.request = requests.get(fileObject['url'], params={'token': self.token}, stream=True, verify=self.options['verify'])
+        try:
+            self.request = requests.get(fileObject['url'], params={'token': self.token}, stream=True, verify=self.options['verify'])
+        except Exception, e:
+            error(e.message)
 
         if self.request.status_code != 200:
             error('download of file %s failed: %s' % (fileObject['name'], self.request.reason))
@@ -411,7 +448,6 @@ class DownloadManager(object):
         totsize = 0
 
         # create the output dir
-        targetdir = "%s/%s" % (self.options['outputdir'], fileObject['parent'].replace(':', '/'))
         try:
             if not os.path.exists(targetdir):
                 os.makedirs(targetdir)
@@ -419,7 +455,6 @@ class DownloadManager(object):
             error(e, True, 101)
 
         # download the file in chunks
-        fileObject['target'] = "%s/%s" % (targetdir, fileObject['name'])
         with open(fileObject['target'], 'wb') as fout:
             start = time.clock()
             for chunk in self.request.iter_content(chunk_size=Config.BUFFER_SIZE):
@@ -430,15 +465,16 @@ class DownloadManager(object):
 
                 # measure download speed
                 elapsed = time.clock() - start
-                start = time.clock()
 
                 # print progress
-                progress = "(%d%%, %s, %s/s)" % (totsize * 100. / filesize, bytesize(totsize), bytesize(int(size / elapsed))) if filesize else ""
+                progress = "(%d%% of %s, %s/s)" % (totsize * 100. / filesize, bytesize(totsize), bytesize(int(size / elapsed))) if filesize else ""
                 if totsize == filesize:
                     sys.stdout.write("\rFile %s of %s downloaded %s" % (fileObject['name'], fileObject['parent'], progress))
                 else:
                     sys.stdout.write("\rDownloading file %s of %s %s" % (fileObject['name'], fileObject['parent'], progress))
                 sys.stdout.flush()
+
+                start = time.clock()
 
             sys.stdout.write('\n')
 
@@ -459,7 +495,7 @@ class DownloadManager(object):
         if output == fileObject['md5']:
             sys.stdout.write("\r" + text % (fileObject['parent'], fileObject['name']) + " PASS")
         else:
-            sys.stdout.write("\r" + text % (fileObject['parent'], fileObject['name']) + " FAIL (%s vs %s)" % (output, fileObject['md5']))
+            sys.stdout.write("\r" + text % (fileObject['parent'], fileObject['name']) + " FAIL (%s (local) vs %s (remote))" % (output, fileObject['md5']))
 
         # store checksum if requested
         if self.options['store-checksum']:
@@ -476,50 +512,60 @@ def bools(b):
 
 def usage(options):
     """ Show usage information """
-    print "%s: massively download collections, deposits and individual files from the SURF Data Repository\n" % (TITLE)
-    print "Syntax: %s token [options]" % sys.argv[0]
-    print "\n where token is your personal access token"
+    print "%s v%s: massively download collections, deposits and individual files from the %s\n" % (TITLE, VERSION, SERVICE)
+    print "Syntax: %s [options] token" % sys.argv[0]
+    print "\nwhere token is your personal API access token. If you do not have an API token yet, create one on the %s website." % SERVICE
     print "\nOptions:"
-    print "--target          -t  set the target instance of %s (default: '%s')" % (SERVICE, BASE_URL)
+    print "--target          -t  set the target instance of %s (default: '%s')" % (SERVICE, Config.BASE_URL)
     print "--favourites      -f  download favourites instead of basket (default: %s)" % bools(options['favourites'])
     print "--output          -o  set target download directory (default: '%s')" % options['outputdir']
     print "--buffer-size     -b  set download buffer size (bytes, default: %d)" % Config.BUFFER_SIZE
-    print "--skip-checksum   -s  skip checksum check after download (default: %s)" %  bools(not options['check-checksum'])
-    print "--store-checksum  -s  store generated checksum after download (default: %s)" % bools(options['store-checksum'])
+    print "--force-overwrite     force overwrite of existing files (default: %s)" % bools(options['force-overwrite'])
+    print "--skip-staging        skip staging of objects (default: %s)" % bools(options['skip-staging'])
+    print "--skip-download       skip downloading of files (default: %s)" % bools(options['skip-download'])
+    print "--skip-checksum   -s  skip checksum check after download (default: %s)" %  bools(options['skip-checksum'])
+    print "--no-resume           do not resume partially downloaded files, redownload instead (default: %s)" % bools(options['no-resume'])
+    print "--store-checksum      store generated checksum after download (default: %s)" % bools(options['store-checksum'])
     print "--verify              verify server certificate (default: %s)" % bools(options['verify'])
+    print "--debug           -d  set debuglevel to max (default: %s)" % bools(Config.DEBUG)
+    print "--dry-run         -n  dry-run mode, simulate staging, downloads and further processing (default: %s)" % bools(Config.DRYRUN)
     print "--version             prints '%s %s'" % (TITLE, VERSION)
-    print "--debug           -d  set debuglevel to max"
     print "--help            -h  help mode"
     print "                  -v  verbose mode"
 
 # parse arguments
 def main(argv):
     options = {
-        'check-checksum': True,
         'store-checksum': False,
+        'force-overwrite': False,
+        'skip-staging': False,
+        'skip-download': False,
+        'skip-checksum': False,
+        'no-resume': False,
         'status-interval': 30,
         'stage-interval': 60,
         'stage-max-count': 10,
         'favourites': False,
         'outputdir': "download",
-        'target': BASE_URL,
+        'target': Config.BASE_URL,
         'verify': False
     }
 
     # handle arguments
     try:
-        opts, args = getopt.gnu_getopt(argv, "hdvo:vfs",  \
-            ["help", "version", "debug", "verbose", "output=", "target=", "verify", "favourites", "skip-checksum", "store-checksum"])
+        opts, args = getopt.gnu_getopt(argv, "hdb:vo:t:vfsn",  \
+            ["help", "version", "debug", "verbose", "output=", "target=", "verify", "favourites", "skip-checksum", "store-checksum", "buffer-size=", "dry-run", "no-resume", "force-overwrite", "skip-download", "skip-staging"])
     except getopt.GetoptError as err:
         error(err, True)
 
-    if not args:
+    if not args and not ('-h' in opts or '--help' in opts):
+        error("missing token")
         usage(options)
         sys.exit(1)
 
     # parse other
     for opt, arg in opts:
-        if opt in ("-h", "--help"):
+        if opt in ["-h", "--help"]:
             usage()
             sys.exit()
         elif opt == "--version":
@@ -527,23 +573,34 @@ def main(argv):
             sys.exit(1)
         elif opt == "--verify":
             options.update({'verify': False})
-        elif opt in ("-s", "--skip-checksum"):
-            options.update({'check-checksum': False})
-        elif opt in ("--store-checksum"):
+        elif opt in ["-s", "--skip-checksum"]:
+            options.update({'skip-checksum': True})
+        elif opt in ["--store-checksum"]:
             options.update({'store-checksum': True})
-        elif opt in ("-f", "--favourites"):
+        elif opt in ["--skip-download"]:
+            options.update({'skip-download': True})
+        elif opt in ["--skip-staging"]:
+            options.update({'skip-staging': True})
+        elif opt in ["--no-resume"]:
+            options.update({'no-resume': True})
+        elif opt in ["--force-overwrite"]:
+            options.update({'force-overwrite': True})
+        elif opt in ["-f", "--favourites"]:
             options.update({'favourites': True})
-        elif opt in ("-d", "--debug"):
+        elif opt in ["-d", "--debug"]:
             Config.DEBUG = True
-        elif opt in ("-v", "--verbose"):
+        elif opt in ["-n", "--dry-run"]:
+            Config.DRYRUN = True
+        elif opt in ["-v", "--verbose"]:
             Config.VERBOSE = True
-        elif opt in ("-b", "--buffer-size"):
+        elif opt in ["-b", "--buffer-size"]:
             Config.BUFFER_SIZE = int(arg)
-        elif opt in ("-o", "--output"):
+        elif opt in ["-o", "--output"]:
             options.update({'outputdir': arg})
-        elif opt in ("-t", "--target"):
+        elif opt in ["-t", "--target"]:
             options.update({'target': arg})
 
+    # start procedures
     dm = DownloadManager()
     dm.setToken(args[0])
     dm.setOptions(options)
