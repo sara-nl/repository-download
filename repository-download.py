@@ -134,17 +134,11 @@ class DownloadManager(object):
 
     def downloadObjectList(self):
         if not self.options['favourites']:
-            self.downloadBasket()
+            data = self._requestAuthenticated('GET', TDR_API_BASKET)
         else:
-            self.downloadFavourites()
+            data = self._requestAuthenticated('GET', TDR_API_FAVOURITES)
 
-    def downloadBasket(self):
-        self.objects = self._requestAuthenticated('GET', TDR_API_BASKET)
-
-        verbose(self.objects)
-
-    def downloadFavourites(self):
-        self.objects = self._requestAuthenticated('GET', TDR_API_FAVOURITES)
+        self.objects = data['result']
 
         verbose(self.objects)
 
@@ -211,7 +205,7 @@ class DownloadManager(object):
 
     def processFavourites(self):
         if self.objects is None or len(self.objects) == 0:
-            error('basket is empty', True)
+            error('favourites list is empty', True)
 
         for b in self.objects:
             pid = b['object']
@@ -223,11 +217,14 @@ class DownloadManager(object):
             debug("in cache: %s" % pid)
             objectInfo = self.cache[pid]
         else:
-            objectInfo = self._request(TDR_API_OBJECTS % pid.replace(':', '/'))
+            data = self._request(TDR_API_OBJECTS % pid.replace(':', '/'))
 
-        if objectInfo is None:
-            return False
-        elif pid not in self.cache.keys():
+            if data is None:
+                return False
+
+            objectInfo = data['result']
+
+        if pid not in self.cache.keys():
             self.cache[pid] = copy.copy(objectInfo)
 
         if objectInfo['type'] in ['collection', 'deposit']:
