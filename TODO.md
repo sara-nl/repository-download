@@ -1,4 +1,5 @@
 # SURF Data Repository TODO
 
-- [ ] Add resumable downloads
+- [X] Add resumable downloads
+- [X] Add total progress counter
 - [ ] Multithreaded processing

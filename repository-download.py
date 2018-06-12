@@ -109,7 +109,16 @@ class DownloadManager(object):
         self.stageObjects = {}
         self.statusObjects = {}
 
+        self.reset()
+
         requests.packages.urllib3.disable_warnings()
+
+    def reset(self):
+        self.cache = {}
+        self.report = {
+            'total-download-size': 0,
+            'bytes-downloaded': 0
+        }
 
     def setToken(self, token):
         self.token = token
@@ -219,6 +228,8 @@ class DownloadManager(object):
             debug("in cache: %s" % pid)
             objectInfo = self.cache[pid]
         else:
+            print "Processing %s" % pid
+
             data = self._request(TDR_API_OBJECTS % pid.replace(':', '/'))
 
             if data is None:
@@ -230,7 +241,6 @@ class DownloadManager(object):
             self.cache[pid] = copy.copy(objectInfo)
 
         if objectInfo['type'] in ['collection', 'deposit']:
-            print "Processing %s" % pid
             if objectInfo['type'] == 'collection':
                 # process collections
                 for c in objectInfo['collections']:
@@ -260,8 +270,20 @@ class DownloadManager(object):
 
         return True
 
-    # report
-    def report(self):
+    # report before processes are initiated
+    def preReport(self):
+        counts = {}
+        for f in self.files.values():
+            if not f['parent'] in counts.keys():
+                counts[f['parent']] = 0
+            counts[f['parent']] += 1
+
+        self.report['total-download-size'] = sum(int(i['size']) for _,i in self.files.items())
+
+        print "Total download size: %s in %d files (%d objects)" % (bytesize(self.report['total-download-size']), len(self.files.values()), len(counts))
+
+    # report after processes are completed
+    def postReport(self):
         finished = filter(lambda x: x['dstatus'] == FileStatus.FINISHED, self.files.values())
 
         counts = {}
@@ -319,7 +341,7 @@ class DownloadManager(object):
                 if not self._processStatusCheck(f):
                     f['dstatus'] = FileStatus.ERROR
 
-        time.sleep(1)
+        return True
 
     def _processStageRequest(self, fileObject):
         # if no status has been found
@@ -368,6 +390,8 @@ class DownloadManager(object):
                 else:
                     f['dstatus'] = FileStatus.ERROR
 
+        return True
+
     def _processChecksums(self):
         for (i, f) in enumerate(self.files.itervalues()):
             if f['dstatus'] == FileStatus.CHECKSUM:
@@ -375,6 +399,8 @@ class DownloadManager(object):
                     f['dstatus'] = FileStatus.FINISHED
                 else:
                     f['dstatus'] = FileStatus.ERROR
+
+        return True
 
     def _stageDeposit(self, pid):
         if len(self.stageObjects) >= self.options['stage-max-count']:
@@ -430,11 +456,15 @@ class DownloadManager(object):
         if not self.options['force-overwrite'] and os.path.exists(fileObject['target']):
             # compare size, if equal return
             localfilesize = os.path.getsize(fileObject['target'])
+
+            # add to reported total download size
+            self.report['bytes-downloaded'] += localfilesize
+
             if localfilesize == int(fileObject['size']):
                 print "File %s of %s already downloaded" % (fileObject['name'], fileObject['parent'])
                 return True
             elif not self.options['no-resume'] and localfilesize > 0:
-                print "Resuming download of file %s of %s at offset %d bytes" % (fileObject['name'], fileObject['parent'], localfilesize)
+                debug("Resuming download of file %s of %s at byte offset %d" % (fileObject['name'], fileObject['parent'], localfilesize))
                 headers.update({'Range': "bytes=%d-" % localfilesize})
                 mode = 'a+b'
 
@@ -453,6 +483,7 @@ class DownloadManager(object):
         # get file size
         filesize = int(self.request.headers.get('content-length')) if 'content-length' in self.request.headers else 1
         totsize = localfilesize
+        downsize = 0
 
         # create the output dir
         try:
@@ -466,23 +497,22 @@ class DownloadManager(object):
             fout.seek(localfilesize, os.SEEK_SET)
 
             start = time.clock()
-            elapsed = 1
             for chunk in self.request.iter_content(chunk_size=Config.BUFFER_SIZE):
                 if chunk:
                     size = len(chunk)
+                    downsize += size
                     totsize += size
                     fout.write(chunk)
 
                 # print progress
-                progress = "(%d%% of %s, %s/s)" % (totsize * 100. / int(fileObject['size']), bytesize(int(fileObject['size'])), bytesize(int(totsize / elapsed))) if filesize else ""
+                progress = "(%d%% of %s, %s/s, %d%% of %s)" % (totsize * 100. / int(fileObject['size']), bytesize(int(fileObject['size'])), bytesize(int(downsize / (time.clock() - start))), (self.report['bytes-downloaded'] * 100. / int(self.report['total-download-size'])), bytesize(self.report['total-download-size'])) if filesize else ""
                 if totsize == filesize:
                     sys.stdout.write("\rFile %s of %s downloaded %s" % (fileObject['name'], fileObject['parent'], progress))
                 else:
                     sys.stdout.write("\rDownloading file %s of %s %s" % (fileObject['name'], fileObject['parent'], progress))
                 sys.stdout.flush()
 
-                # get elapsed time
-                elapsed = time.clock() - start
+                self.report['bytes-downloaded'] += size
 
             sys.stdout.write('\n')
 
@@ -490,8 +520,8 @@ class DownloadManager(object):
 
     # check the checksum of a downloaded file
     def _checksumFile(self, fileObject):
-        text = "Comparing local checksum of object %s file '%s'"
-        sys.stdout.write(text % (fileObject['parent'], fileObject['name']))
+        text = "Comparing local checksum of file %s of object %s" % (fileObject['name'], fileObject['parent'])
+        sys.stdout.write(text)
 
         # calculate the local checksum
         try:
@@ -501,9 +531,9 @@ class DownloadManager(object):
 
         # compare with retrieved checksum
         if output == fileObject['md5']:
-            sys.stdout.write("\r" + text % (fileObject['parent'], fileObject['name']) + " PASS")
+            sys.stdout.write("\r" + text + " PASS")
         else:
-            sys.stdout.write("\r" + text % (fileObject['parent'], fileObject['name']) + " FAIL (%s (local) vs %s (remote))" % (output, fileObject['md5']))
+            sys.stdout.write("\r" + text + " FAIL (%s (local) vs %s (remote))" % (output, fileObject['md5']))
 
         # store checksum if requested
         if self.options['store-checksum']:
@@ -602,8 +632,9 @@ def main(argv):
     dm.setOptions(options)
     dm.downloadObjectList()
     dm.processObjectList()
+    dm.preReport()
     dm.startProcesses()
-    dm.report()
+    dm.postReport()
 
 if __name__ == "__main__":
     main(sys.argv[1:])
