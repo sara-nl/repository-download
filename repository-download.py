@@ -154,7 +154,9 @@ class DownloadManager(object):
         url = "%s/%s" % (self.options['target'], uri) if self.options['target'] not in uri else uri
 
         try:
-            self.request = requests.request(method, url, headers=headers, params=params, verify=self.options['verify'])
+            self.request = requests.request(method, url, headers=headers, params=params, verify=not self.options['no-verify'], timeout=self.options['request-timeout'])
+        except requests.exceptions.ReadTimeout, e:
+            error("request time out after %d seconds" % self.options['request-timeout'], True, 2)
         except requests.exceptions.SSLError, e:
             error(e.message, True, 2)
 
@@ -514,16 +516,16 @@ def usage(options):
     print "\nwhere token is your personal API access token. If you do not have an API token yet, create one on the %s website." % SERVICE
     print "\nOptions:"
     print "--target          -t  set the target instance of %s (default: '%s')" % (SERVICE, Config.BASE_URL)
-    print "--favourites      -f  download favourites instead of basket (default: %s)" % bools(options['favourites'])
+    print "--favourites          download favourites instead of basket (default: %s)" % bools(options['favourites'])
     print "--output          -o  set target download directory (default: '%s')" % options['outputdir']
     print "--buffer-size     -b  set download buffer size (bytes, default: %d)" % Config.BUFFER_SIZE
     print "--force-overwrite     force overwrite of existing files (default: %s)" % bools(options['force-overwrite'])
     print "--skip-staging        skip staging of objects (default: %s)" % bools(options['skip-staging'])
     print "--skip-download       skip downloading of files (default: %s)" % bools(options['skip-download'])
-    print "--skip-checksum   -s  skip checksum check after download (default: %s)" %  bools(options['skip-checksum'])
+    print "--skip-checksum       skip checksum check after download (default: %s)" %  bools(options['skip-checksum'])
     print "--no-resume           do not resume partially downloaded files, redownload instead (default: %s)" % bools(options['no-resume'])
     print "--store-checksum      store generated checksum after download (default: %s)" % bools(options['store-checksum'])
-    print "--verify              verify server certificate (default: %s)" % bools(options['verify'])
+    print "--no-verify           verify server certificate (default: %s)" % bools(options['verify'])
     print "--debug           -d  set debuglevel to max (default: %s)" % bools(Config.DEBUG)
     print "--dry-run         -n  dry-run mode, simulate staging, downloads and further processing (default: %s)" % bools(Config.DRYRUN)
     print "--version             prints '%s %s'" % (TITLE, VERSION)
@@ -539,19 +541,20 @@ def main(argv):
         'skip-download': False,
         'skip-checksum': False,
         'no-resume': False,
+        'favourites': False,
+        'request-timeout': 30,
         'status-interval': 30,
         'stage-interval': 60,
         'stage-max-count': 10,
-        'favourites': False,
         'outputdir': "download",
         'target': Config.BASE_URL,
-        'verify': False
+        'no-verify': False
     }
 
     # handle arguments
     try:
-        opts, args = getopt.gnu_getopt(argv, "hdb:vo:t:vfsn",  \
-            ["help", "version", "debug", "verbose", "output=", "target=", "verify", "favourites", "skip-checksum", "store-checksum", "buffer-size=", "dry-run", "no-resume", "force-overwrite", "skip-download", "skip-staging"])
+        opts, args = getopt.gnu_getopt(argv, "hdb:vo:t:n",  \
+            ["help", "version", "debug", "verbose", "output=", "target=", "no-verify", "favourites", "skip-checksum", "store-checksum", "buffer-size=", "dry-run", "no-resume", "force-overwrite", "skip-download", "skip-staging"])
     except getopt.GetoptError as err:
         error(err, True)
 
@@ -568,22 +571,8 @@ def main(argv):
         elif opt == "--version":
             print "%s %s" % (TITLE, VERSION)
             sys.exit(1)
-        elif opt == "--verify":
-            options.update({'verify': False})
-        elif opt in ["-s", "--skip-checksum"]:
-            options.update({'skip-checksum': True})
-        elif opt in ["--store-checksum"]:
-            options.update({'store-checksum': True})
-        elif opt in ["--skip-download"]:
-            options.update({'skip-download': True})
-        elif opt in ["--skip-staging"]:
-            options.update({'skip-staging': True})
-        elif opt in ["--no-resume"]:
-            options.update({'no-resume': True})
-        elif opt in ["--force-overwrite"]:
-            options.update({'force-overwrite': True})
-        elif opt in ["-f", "--favourites"]:
-            options.update({'favourites': True})
+        elif opt in ["--no-verify", "--skip-checksum", "--store-checksum", "--skip-download", "--skip-staging", "--no-resume", "--force-overwrite", "--favourites"]:
+            options.update({opt[2:]: True})
         elif opt in ["-d", "--debug"]:
             Config.DEBUG = True
         elif opt in ["-n", "--dry-run"]:
