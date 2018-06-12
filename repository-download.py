@@ -6,7 +6,7 @@ class Config:
     VERBOSE = False
     QUIET = False
     DRYRUN = False
-    BUFFER_SIZE = 1024 * 1024
+    BUFFER_SIZE = 8 * 1024 * 1024
     BASE_URL = 'https://tdr-devel.surfsara.nl'
 
 def message(msg, mtype = 'debug', showstack = False):
@@ -422,21 +422,29 @@ class DownloadManager(object):
         targetdir = "%s/%s" % (self.options['outputdir'], fileObject['parent'].replace(':', '/'))
         fileObject['target'] = "%s/%s" % (targetdir, fileObject['name'])
 
+        headers = {}
+        mode = 'wb'
+        localfilesize = 0
+
         # check if file is present
         if not self.options['force-overwrite'] and os.path.exists(fileObject['target']):
             # compare size, if equal return
-            filesize = os.path.getsize(fileObject['target'])
-            if filesize == int(fileObject['size']):
+            localfilesize = os.path.getsize(fileObject['target'])
+            if localfilesize == int(fileObject['size']):
                 print "File %s of %s already downloaded" % (fileObject['name'], fileObject['parent'])
                 return True
+            elif not self.options['no-resume'] and localfilesize > 0:
+                print "Resuming download of file %s of %s at offset %d bytes" % (fileObject['name'], fileObject['parent'], localfilesize)
+                headers.update({'Range': "bytes=%d-" % localfilesize})
+                mode = 'a+b'
 
         # request streaming data
         try:
-            self.request = requests.get(fileObject['url'], params={'token': self.token}, stream=True, verify=self.options['verify'])
+            self.request = requests.get(fileObject['url'], headers=headers, params={'token': self.token}, stream=True, verify=not self.options['no-verify'])
         except Exception, e:
-            error(e.message)
+            error(e)
 
-        if self.request.status_code != 200:
+        if self.request.status_code not in [200, 206]:
             error('download of file %s failed: %s' % (fileObject['name'], self.request.reason))
             return False
 
@@ -444,7 +452,7 @@ class DownloadManager(object):
 
         # get file size
         filesize = int(self.request.headers.get('content-length')) if 'content-length' in self.request.headers else 1
-        totsize = 0
+        totsize = localfilesize
 
         # create the output dir
         try:
@@ -453,27 +461,28 @@ class DownloadManager(object):
         except OSError, e:
             error(e, True, 101)
 
-        # download the file in chunks
-        with open(fileObject['target'], 'wb') as fout:
+        # download the file in chunks (append if resuming)
+        with open(fileObject['target'], mode) as fout:
+            fout.seek(localfilesize, os.SEEK_SET)
+
             start = time.clock()
+            elapsed = 1
             for chunk in self.request.iter_content(chunk_size=Config.BUFFER_SIZE):
                 if chunk:
                     size = len(chunk)
                     totsize += size
                     fout.write(chunk)
 
-                # measure download speed
-                elapsed = time.clock() - start
-
                 # print progress
-                progress = "(%d%% of %s, %s/s)" % (totsize * 100. / filesize, bytesize(totsize), bytesize(int(size / elapsed))) if filesize else ""
+                progress = "(%d%% of %s, %s/s)" % (totsize * 100. / int(fileObject['size']), bytesize(int(fileObject['size'])), bytesize(int(totsize / elapsed))) if filesize else ""
                 if totsize == filesize:
                     sys.stdout.write("\rFile %s of %s downloaded %s" % (fileObject['name'], fileObject['parent'], progress))
                 else:
                     sys.stdout.write("\rDownloading file %s of %s %s" % (fileObject['name'], fileObject['parent'], progress))
                 sys.stdout.flush()
 
-                start = time.clock()
+                # get elapsed time
+                elapsed = time.clock() - start
 
             sys.stdout.write('\n')
 
@@ -547,6 +556,7 @@ def main(argv):
         'stage-interval': 60,
         'stage-max-count': 10,
         'outputdir': "download",
+        'max-download-size': 0,
         'target': Config.BASE_URL,
         'no-verify': False
     }
