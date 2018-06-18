@@ -6,7 +6,7 @@ class Config:
     VERBOSE = False
     QUIET = False
     DRYRUN = False
-    BUFFER_SIZE = 8 * 1024 * 1024
+    BUFFER_SIZE = 2 * 1024 * 1024
     BASE_URL = 'https://tdr-devel.surfsara.nl'
 
 def message(msg, mtype = 'debug', showstack = False):
@@ -69,6 +69,7 @@ TDR_API_FAVOURITES = 'api/favourites'
 TDR_API_OBJECTS = 'api/objects/%s'
 TDR_API_STATUS = 'api/objects/%s/%s/status'
 TDR_API_STAGE = 'api/objects/%s/%s/stage'
+TDR_API_STAGE_FILE = 'api/objects/%s/%s/stage/%s'
 
 STATUS_ONLINE = ['REG', 'DUL']
 STATUS_OFFLINE = ['OFL', 'MIG']
@@ -142,6 +143,7 @@ class DownloadManager(object):
                 self.options.update({k: v})
 
     def downloadObjectList(self):
+        print "Downloading your %s" % ("basket" if not self.options['favourites'] else "favourites")
         if not self.options['favourites']:
             data = self._requestAuthenticated('GET', TDR_API_BASKET)
         else:
@@ -153,7 +155,21 @@ class DownloadManager(object):
 
     def _requestStatus(self, pid, fileID = None):
         pids = pid.split(':')
-        return self._request(TDR_API_STATUS % (pids[0], pids[1]))
+        url = TDR_API_STATUS % (pids[0], pids[1])
+
+        if fileID:
+            url += "/%s" % fileID
+
+        return self._requestAuthenticated('GET', url)
+
+    def _requestStage(self, pid, fileID = None):
+        pids = pid.split(':')
+        url = TDR_API_STAGE % (pids[0], pids[1])
+
+        if fileID:
+            url += "/%s" % fileID
+
+        return self._requestAuthenticated('POST', url)
 
     def _requestAuthenticated(self, method, endpoint, headers={}, params={}):
         params['token'] = self.token
@@ -314,77 +330,79 @@ class DownloadManager(object):
 
     # initiate download and stage processes
     def startProcesses(self):
+        if len(self.files) == 0:
+            notice("There are no files to be processed")
+            return True
+
         while len(filter(lambda x: not x['dstatus'] in [FileStatus.FINISHED, FileStatus.ERROR, FileStatus.SKIP], self.files.values())) > 0:
-            if len(filter(lambda x: x['dstatus'] in [FileStatus.STAGE, FileStatus.STAGING], self.files.values())) > 0:
+            if len(filter(lambda x: x['dstatus'] in [FileStatus.STAGE], self.files.values())) > 0:
                 self._processStaging()
-            if len(filter(lambda x: x['dstatus'] == FileStatus.DOWNLOAD, self.files.values())) > 0:
+            if len(filter(lambda x: x['dstatus'] in [FileStatus.STAGING, FileStatus.DOWNLOAD], self.files.values())) > 0:
                 self._processDownloads()
-            if len(filter(lambda x: x['dstatus'] == FileStatus.CHECKSUM, self.files.values())) > 0:
+            if len(filter(lambda x: x['dstatus'] in [FileStatus.CHECKSUM], self.files.values())) > 0:
                 self._processChecksums()
+
+            time.sleep(1)
 
     # process all files and objects to be staged
     def _processStaging(self):
         for (i, f) in enumerate(self.files.itervalues()):
             if f['dstatus'] == FileStatus.STAGE:
                 # check if deposit has already been staged recently
-                if not f['parent'] in self.stageObjects.keys() or time.time() - self.stageObjects[f['parent']]['updated'] > self.options['stage-interval']:
-                    self._stageDeposit(f['parent'])
+                if not 'stage_request' in f:
+                    self._stageDepositFile(f)
 
                 if not self._processStageRequest(f):
-                    f['dstatus'] = FileStatus.ERROR
-            elif f['dstatus'] == FileStatus.STAGING:
-                # check if deposit has already been checked for status recently
-                if not f['parent'] in self.statusObjects.keys() or time.time() - self.statusObjects[f['parent']]['updated'] > self.options['status-interval']:
-                    self._statusDeposit(f['parent'], f['id'])
-
-                # check if status has changed
-                if not self._processStatusCheck(f):
                     f['dstatus'] = FileStatus.ERROR
 
         return True
 
     def _processStageRequest(self, fileObject):
         # if no status has been found
-        if not fileObject['parent'] in self.stageObjects or not self.stageObjects[fileObject['parent']]['result']:
+        if not 'stage_request' in fileObject or not fileObject['stage_request']['result']:
             return False
         # check when last attempt was made
-        if 'stage_requested' in fileObject and time.time() - fileObject['stage_requested'] <= self.options['stage-interval']:
+        if time.time() - fileObject['stage_request']['updated'] <= self.options['stage-interval']:
             return True
 
-        debug(' Check stage request for file %s' % fileObject['name'])
+        debug(' Check stage request for file %s %s' % (fileObject['name'], fileObject['stage_request']['result']['code']))
 
-        # check stage result
-        if self.stageObjects[fileObject['parent']]['result']['code'] == '200':
-            if fileObject['status'] in STATUS_STAGING:
-                fileObject['dstatus'] = FileStatus.STAGING
-
-        fileObject['stage_requested'] = time.time()
+        # check stage result, if successful set to staging
+        if fileObject['stage_request']['result']['code'] == 200:
+            fileObject['dstatus'] = FileStatus.STAGING
 
         return True
 
     def _processStatusCheck(self, fileObject):
         # if no status has been found
-        if not fileObject['parent'] in self.statusObjects or not self.statusObjects[fileObject['parent']]['result']:
+        if not 'status_request' in fileObject or not fileObject['status_request']['result']:
             return False
         # check when last attempt was made
-        if 'status_checked' in fileObject and time.time() - fileObject['status_checked'] <= self.options['status-interval']:
+        if 'updated' in fileObject['status_request'] and time.time() - fileObject['status_request']['updated'] <= self.options['status-interval']:
             return True
 
         debug(' Check status for file %s' % fileObject['name'])
 
-        # find file ID in result and check status
-        for f in self.statusObjects[fileObject['parent']]['result']:
-            if f['id'] == fileObject['id']:
-                if f['status'] in STATUS_ONLINE:
-                    f['dstatus'] = FileStatus.DOWNLOAD
+        if fileObject['status_request']['result']['code'] == 200:
+            if fileObject['status_request']['result']['result'] in STATUS_ONLINE:
+                fileObject['dstatus'] = FileStatus.DOWNLOAD
 
-        fileObject['status_checked'] = time.time()
+        # remove current status result
+        del fileObject['status_request']
 
         return True
 
     def _processDownloads(self):
         for (i, f) in enumerate(self.files.itervalues()):
-            if f['dstatus'] == FileStatus.DOWNLOAD:
+            if f['dstatus'] == FileStatus.STAGING:
+                # check if deposit has already been checked for status recently
+                if not 'status_request' in f:
+                    self._statusDepositFile(f)
+
+                # check if status has changed
+                if not self._processStatusCheck(f):
+                    f['dstatus'] = FileStatus.ERROR
+            elif f['dstatus'] == FileStatus.DOWNLOAD:
                 if self._downloadFile(f):
                     f['dstatus'] = FileStatus.CHECKSUM if not self.options['skip-checksum'] else FileStatus.SKIP
                 else:
@@ -409,8 +427,7 @@ class DownloadManager(object):
 
         print 'Staging %s' % pid
 
-        pids = pid.split(':')
-        success = self._requestAuthenticated('POST', TDR_API_STAGE % (pids[0], pids[1]))
+        success = self._requestStage(pid)
 
         # add to stage cache
         self.stageObjects.update({pid: {'updated': time.time(), 'result': None}})
@@ -423,11 +440,26 @@ class DownloadManager(object):
 
         return True
 
-    def _statusDeposit(self, pid, fileID=None):
+    def _stageDepositFile(self, fileObject):
+        print 'Staging file %s of object %s' % (fileObject['name'], fileObject['parent'])
+
+        success = self._requestStage(fileObject['parent'], fileObject['id'])
+
+        # add to stage cache
+        fileObject['stage_request'] = {'updated': time.time(), 'result': None}
+
+        if not success:
+            error('object staging of %s failed (%s): %s' % (fileObject['parent'], self.request.status_code, self.rdata['error']))
+            return False
+
+        fileObject['stage_request']['result'] = self.rdata
+
+        return True
+
+    def _statusDeposit(self, pid):
         print 'Status %s' % pid
 
-        pids = pid.split(':')
-        success = self._requestAuthenticated(TDR_API_STATUS % (pids[0], pids[1]))
+        success = self._requestStatus(pid)
 
         # add to status cache
         self.statusObjects.update({pid: {'updated': time.time(), 'result': None}})
@@ -436,8 +468,23 @@ class DownloadManager(object):
             error('object status of %s failed (%s): %s' % (pid, self.request.status_code, self.rdata['error']))
             return False
 
-        print self.rdata
         self.statusObjects[pid]['result'] = self.rdata
+
+        return True
+
+    def _statusDepositFile(self, fileObject):
+        print 'Status file %s of object %s' % (fileObject['name'], fileObject['parent'])
+
+        success = self._requestStatus(fileObject['parent'], fileObject['id'])
+
+        # add to status cache
+        fileObject['status_request'] = {'updated': time.time(), 'result': None}
+
+        if not success:
+            error('object status of %s failed (%s): %s' % (fileObject['parent'], self.request.status_code, self.rdata['error']))
+            return False
+
+        fileObject['status_request']['result'] = self.rdata
 
         return True
 
@@ -493,28 +540,33 @@ class DownloadManager(object):
             error(e, True, 101)
 
         # download the file in chunks (append if resuming)
-        with open(fileObject['target'], mode) as fout:
-            fout.seek(localfilesize, os.SEEK_SET)
+        try:
+            with open(fileObject['target'], mode) as fout:
+                fout.seek(localfilesize, os.SEEK_SET)
 
-            start = time.clock()
-            for chunk in self.request.iter_content(chunk_size=Config.BUFFER_SIZE):
-                if chunk:
-                    size = len(chunk)
-                    downsize += size
-                    totsize += size
-                    fout.write(chunk)
+                start = time.clock()
+                for chunk in self.request.iter_content(chunk_size=Config.BUFFER_SIZE):
+                    if chunk:
+                        size = len(chunk)
+                        downsize += size
+                        totsize += size
+                        fout.write(chunk)
 
-                # print progress
-                progress = "(%d%% of %s, %s/s, %d%% of %s)" % (totsize * 100. / int(fileObject['size']), bytesize(int(fileObject['size'])), bytesize(int(downsize / (time.clock() - start))), (self.report['bytes-downloaded'] * 100. / int(self.report['total-download-size'])), bytesize(self.report['total-download-size'])) if filesize else ""
-                if totsize == filesize:
-                    sys.stdout.write("\rFile %s of %s downloaded %s" % (fileObject['name'], fileObject['parent'], progress))
-                else:
-                    sys.stdout.write("\rDownloading file %s of %s %s" % (fileObject['name'], fileObject['parent'], progress))
-                sys.stdout.flush()
+                    # print progress
+                    percentage = totsize * 100. / int(fileObject['size'])
+                    progress = "(%d%% of %s, %s/s, %d%% of %s)" % (percentage, bytesize(int(fileObject['size'])), bytesize(int(downsize / (time.clock() - start))), (self.report['bytes-downloaded'] * 100. / int(self.report['total-download-size'])), bytesize(self.report['total-download-size'])) if filesize else ""
+                    if totsize == filesize or (self.options['test'] and percentage > 1):
+                        sys.stdout.write("\rFile %s of %s downloaded %s" % (fileObject['name'], fileObject['parent'], progress))
+                        break
+                    else:
+                        sys.stdout.write("\rDownloading file %s of %s %s" % (fileObject['name'], fileObject['parent'], progress))
+                    sys.stdout.flush()
 
-                self.report['bytes-downloaded'] += size
+                    self.report['bytes-downloaded'] += size
 
-            sys.stdout.write('\n')
+                sys.stdout.write('\n')
+        except Exception, e:
+            error(e, True, 3)
 
         return True
 
@@ -566,6 +618,7 @@ def usage(options):
     print "--store-checksum      store generated checksum after download (default: %s)" % bools(options['store-checksum'])
     print "--no-verify           verify server certificate (default: %s)" % bools(options['verify'])
     print "--debug           -d  set debuglevel to max (default: %s)" % bools(Config.DEBUG)
+    print "--test.               test mode, limits data downloads (default: %s)" % bools(options['test-mode'])
     print "--dry-run         -n  dry-run mode, simulate staging, downloads and further processing (default: %s)" % bools(Config.DRYRUN)
     print "--version             prints '%s %s'" % (TITLE, VERSION)
     print "--help            -h  help mode"
@@ -583,18 +636,19 @@ def main(argv):
         'favourites': False,
         'request-timeout': 30,
         'status-interval': 30,
-        'stage-interval': 60,
+        'stage-interval': 10,
         'stage-max-count': 10,
         'outputdir': "download",
         'max-download-size': 0,
         'target': Config.BASE_URL,
+        'test': False,
         'no-verify': False
     }
 
     # handle arguments
     try:
         opts, args = getopt.gnu_getopt(argv, "hdb:vo:t:n",  \
-            ["help", "version", "debug", "verbose", "output=", "target=", "no-verify", "favourites", "skip-checksum", "store-checksum", "buffer-size=", "dry-run", "no-resume", "force-overwrite", "skip-download", "skip-staging"])
+            ["help", "version", "debug", "verbose", "output=", "target=", "no-verify", "favourites", "skip-checksum", "store-checksum", "buffer-size=", "dry-run", "no-resume", "force-overwrite", "skip-download", "skip-staging", "test"])
     except getopt.GetoptError as err:
         error(err, True)
 
@@ -611,7 +665,7 @@ def main(argv):
         elif opt == "--version":
             print "%s %s" % (TITLE, VERSION)
             sys.exit(1)
-        elif opt in ["--no-verify", "--skip-checksum", "--store-checksum", "--skip-download", "--skip-staging", "--no-resume", "--force-overwrite", "--favourites"]:
+        elif opt in ["--no-verify", "--skip-checksum", "--store-checksum", "--skip-download", "--skip-staging", "--no-resume", "--force-overwrite", "--favourites", "--test"]:
             options.update({opt[2:]: True})
         elif opt in ["-d", "--debug"]:
             Config.DEBUG = True
