@@ -1,3 +1,17 @@
+ # Copyright 2018 SURFsara B.V.
+ #
+ # Licensed under the Apache License, Version 2.0 (the "License");
+ # you may not use this file except in compliance with the License.
+ # You may obtain a copy of the License at
+ #
+ #     http://www.apache.org/licenses/LICENSE-2.0
+ #
+ # Unless required by applicable law or agreed to in writing, software
+ # distributed under the License is distributed on an "AS IS" BASIS,
+ # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+
 #!/usr/bin/env python
 
 class Config:
@@ -616,9 +630,9 @@ def usage(options):
     print "--skip-checksum       skip checksum check after download (default: %s)" %  bools(options['skip-checksum'])
     print "--no-resume           do not resume partially downloaded files, redownload instead (default: %s)" % bools(options['no-resume'])
     print "--store-checksum      store generated checksum after download (default: %s)" % bools(options['store-checksum'])
-    print "--no-verify           verify server certificate (default: %s)" % bools(options['verify'])
+    print "--no-verify           do not verify server certificate (default: %s)" % bools(options['no-verify'])
     print "--debug           -d  set debuglevel to max (default: %s)" % bools(Config.DEBUG)
-    print "--test.               test mode, limits data downloads (default: %s)" % bools(options['test-mode'])
+    print "--test                test mode, limits data downloads (default: %s)" % bools(options['test'])
     print "--dry-run         -n  dry-run mode, simulate staging, downloads and further processing (default: %s)" % bools(Config.DRYRUN)
     print "--version             prints '%s %s'" % (TITLE, VERSION)
     print "--help            -h  help mode"
