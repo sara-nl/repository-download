@@ -5,7 +5,7 @@ Automated download tool for user basket or favourites.
 ### General usage
 
 ```sh
-./repository-download.py [options] [--favourites] <token>
+./repository-download.py [options] [--favourites] [--target <url>] <token>
 ```
 
 where `token` is your token generated in the user interface of the Data Repository.

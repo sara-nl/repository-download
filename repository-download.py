@@ -1,18 +1,18 @@
- # Copyright 2018 SURFsara B.V.
- #
- # Licensed under the Apache License, Version 2.0 (the "License");
- # you may not use this file except in compliance with the License.
- # You may obtain a copy of the License at
- #
- #     http://www.apache.org/licenses/LICENSE-2.0
- #
- # Unless required by applicable law or agreed to in writing, software
- # distributed under the License is distributed on an "AS IS" BASIS,
- # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- # See the License for the specific language governing permissions and
- # limitations under the License.
-
 #!/usr/bin/env python
+
+# Copyright 2018 SURFsara B.V.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 class Config:
     DEBUG = False
@@ -21,7 +21,7 @@ class Config:
     QUIET = False
     DRYRUN = False
     BUFFER_SIZE = 2 * 1024 * 1024
-    BASE_URL = 'https://tdr-devel.surfsara.nl'
+    BASE_URL = 'https://repository.surfsara.nl'
 
 def message(msg, mtype = 'debug', showstack = False):
     ''' Print message'''
@@ -70,9 +70,9 @@ def verbose(msg):
     message(msg, 'verbose')
 
 try:
-    import sys, os, getopt, requests, inspect, traceback, pprint, copy, cchardet, re, time, math, simplejson, subprocess
+    import sys, os, signal, getopt, requests, inspect, pprint, copy, cchardet, re, time, math, simplejson, subprocess
 except Exception, e:
-    error(e, True, 100)
+    error("%s, please install the module by running the command: pip install %s" % (e.message, e.message.split(' ')[-1]), True)
 
 SERVICE = "SURF Data Repository"
 TITLE = SERVICE + " download tool"
@@ -224,6 +224,8 @@ class DownloadManager(object):
             return self.rdata
         elif self.request.status_code == 401:
             error("could not authenticate using token", True)
+        elif self.request.status_code >= 300:
+            error("request failed: %s %s" % (self.request.status_code, self.request.reason), True)
         elif self.rdata is dict and "error" in self.rdata:
             error(self.rdata["error"])
         else:
@@ -366,8 +368,8 @@ class DownloadManager(object):
                 if not 'stage_request' in f:
                     self._stageDepositFile(f)
 
-                if not self._processStageRequest(f):
-                    f['dstatus'] = FileStatus.ERROR
+                # if not self._processStageRequest(f):
+                #     f['dstatus'] = FileStatus.ERROR
 
         return True
 
@@ -391,9 +393,6 @@ class DownloadManager(object):
         # if no status has been found
         if not 'status_request' in fileObject or not fileObject['status_request']['result']:
             return False
-        # check when last attempt was made
-        if 'updated' in fileObject['status_request'] and time.time() - fileObject['status_request']['updated'] <= self.options['status-interval']:
-            return True
 
         debug(' Check status for file %s' % fileObject['name'])
 
@@ -412,6 +411,8 @@ class DownloadManager(object):
                 # check if deposit has already been checked for status recently
                 if not 'status_request' in f:
                     self._statusDepositFile(f)
+                elif 'updated' in f['status_request'] and time.time() - f['status_request']['updated'] <= self.options['status-interval']:
+                    continue
 
                 # check if status has changed
                 if not self._processStatusCheck(f):
@@ -599,7 +600,7 @@ class DownloadManager(object):
         if output == fileObject['md5']:
             sys.stdout.write("\r" + text + " PASS")
         else:
-            sys.stdout.write("\r" + text + " FAIL (%s (local) vs %s (remote))" % (output, fileObject['md5']))
+            sys.stdout.write("\n FAIL (%s (local) vs %s (remote))" % (output, fileObject['md5']))
 
         # store checksum if requested
         if self.options['store-checksum']:
@@ -610,6 +611,9 @@ class DownloadManager(object):
         sys.stdout.write('\n')
 
         return output == fileObject['md5']
+
+def signalHandler(signal, frame):
+    error('execution interrupted', True, 1)
 
 def bools(b):
     return "yes" if b else "no"
@@ -693,6 +697,9 @@ def main(argv):
             options.update({'outputdir': arg})
         elif opt in ["-t", "--target"]:
             options.update({'target': arg})
+
+    # allow graceful exit on interrupt
+    signal.signal(signal.SIGINT, signalHandler)
 
     # start procedures
     dm = DownloadManager()
