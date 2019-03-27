@@ -43,11 +43,13 @@ def message(msg, mtype='debug', color=0, showstack=False, out=sys.stdout):
         finally:
             # this breaks reference cycles in Python interpreter
             del frames
+    else:
+        out.write("%s: " % mtype)
 
     if Config.DEBUG_COLORS:
         out.write('\x1b[0m')
 
-    out.write("%s: %s\n" % (mtype, msg))
+    out.write("%s\n" % msg)
 
 def error(msg, exitCode=None):
     message("error: %s" % msg, 'error', 31, True, out=sys.stderr)
@@ -58,8 +60,8 @@ def error(msg, exitCode=None):
 def debug(msg):
     message(msg, color=32)
 
-def notice(msg):
-    message(msg, 'notice', color=30)
+def note(msg):
+    message(msg, 'note', color=30)
 
 def verbose(msg):
     message(msg, 'verbose', color=33)
@@ -134,20 +136,18 @@ class DownloadManager(object):
     def setToken(self, token):
         self.token = token
         if not token is None:
-            debug("Token: " + token)
+            debug("token: " + token)
 
     def setOutputDir(self, directory):
         path = "%s/%s" % (os.getcwd(), directory)
         if not os.path.exists(path):
-            notice("path created: %s" % path)
+            note("path created: %s" % path)
             os.mkdir(path)
 
         self.options.update({'outputdir': directory})
 
     def setOptions(self, options):
-        self.options = {}
-        if not options:
-            return
+        self.options = options
         for k, v in options.items():
             try:
                 index = map(str.lower, dir(self)).index(("set%s" % k).lower())
@@ -349,8 +349,8 @@ class DownloadManager(object):
 
     # initiate download and stage processes
     def startProcesses(self):
-        if len(self.files) == 0:
-            notice("There are no files to be processed")
+        if not self.files:
+            note("there are no files to be processed")
             return True
 
         while len([*filter(lambda x: not x['dstatus'] in [FileStatus.FINISHED, FileStatus.ERROR, FileStatus.SKIP], self.files.values())]) > 0:
@@ -361,11 +361,11 @@ class DownloadManager(object):
             if len([*filter(lambda x: x['dstatus'] in [FileStatus.CHECKSUM], self.files.values())]) > 0:
                 self._processChecksums()
 
-            time.sleep(1)
+            time.sleep(0.5)
 
     # process all files and objects to be staged
     def _processStaging(self):
-        for (i, f) in enumerate(self.files.values()):
+        for f in self.files.values():
             if f['dstatus'] == FileStatus.STAGE:
                 # check if deposit has already been staged recently
                 if not 'stage_request' in f:
@@ -443,7 +443,7 @@ class DownloadManager(object):
             debug('maximum number of stage requests exceeded')
             return False
 
-        print('Staging %s' % pid)
+        print('Staging object %s' % pid)
 
         success = self._requestStage(pid)
 
@@ -451,7 +451,7 @@ class DownloadManager(object):
         self.stageObjects.update({pid: {'updated': time.time(), 'result': None}})
 
         if not success:
-            error('object staging of %s failed (%s): %s' % (pid, self.request.status_code, self.rdata['error']))
+            error('staging of object %s failed (%s): %s' % (pid, self.request.status_code, self.rdata['error']))
             return False
 
         self.stageObjects[pid]['result'] = self.rdata
@@ -459,7 +459,7 @@ class DownloadManager(object):
         return True
 
     def _stageDepositFile(self, fileObject):
-        print('Staging file %s of object %s' % (fileObject['name'], fileObject['parent']))
+        print("Staging file '%s' of object %s" % (fileObject['name'], fileObject['parent']))
 
         success = self._requestStage(fileObject['parent'], fileObject['id'])
 
@@ -491,7 +491,7 @@ class DownloadManager(object):
         return True
 
     def _statusDepositFile(self, fileObject):
-        print('Status file %s of object %s' % (fileObject['name'], fileObject['parent']))
+        print("Status file '%s' of object %s" % (fileObject['name'], fileObject['parent']))
 
         success = self._requestStatus(fileObject['parent'], fileObject['id'])
 
@@ -526,10 +526,10 @@ class DownloadManager(object):
             self.report['bytes-downloaded'] += localfilesize
 
             if localfilesize == int(fileObject['size']):
-                print("File %s of %s already downloaded" % (fileObject['name'], fileObject['parent']))
+                print("File '%s' of object %s already downloaded" % (fileObject['name'], fileObject['parent']))
                 return True
             elif not self.options['no-resume'] and localfilesize > 0:
-                debug("Resuming download of file %s of %s at byte offset %d" % (fileObject['name'], fileObject['parent'], localfilesize))
+                debug("Resuming download of file '%s' of object %s at byte offset %d" % (fileObject['name'], fileObject['parent'], localfilesize))
                 headers.update({'Range': "bytes=%d-" % localfilesize})
                 mode = 'a+b'
 
@@ -540,7 +540,7 @@ class DownloadManager(object):
             error(e)
 
         if self.request.status_code not in [200, 206]:
-            error('download of file %s failed: %s' % (fileObject['name'], self.request.reason))
+            error("download of file '%s' failed: %s" % (fileObject['name'], self.request.reason))
             return False
 
         debug("%s %s" % (self.request.request.method, self.request.url))
@@ -576,10 +576,10 @@ class DownloadManager(object):
                     progress = "(%d%% of %s, %s/s, %d%% of %s)" % (percentage, bytesize(int(fileObject['size'])), bytesize(int(downsize / (time.process_time() - start))), (self.report['bytes-downloaded'] * 100. / int(self.report['total-download-size'])), bytesize(self.report['total-download-size'])) if filesize else ""
 
                     if totsize == filesize or (self.options['test'] and percentage > 1):
-                        sys.stdout.write("\rFile %s of %s downloaded %s" % (fileObject['name'], fileObject['parent'], progress))
+                        sys.stdout.write("\rFile '%s' of object %s downloaded %s" % (fileObject['name'], fileObject['parent'], progress))
                         break
                     else:
-                        sys.stdout.write("\rDownloading file %s of %s %s" % (fileObject['name'], fileObject['parent'], progress))
+                        sys.stdout.write("\rDownloading file '%s' of object %s %s" % (fileObject['name'], fileObject['parent'], progress))
                     sys.stdout.flush()
 
                 sys.stdout.write('\n')
@@ -590,7 +590,7 @@ class DownloadManager(object):
 
     # check the checksum of a downloaded file
     def _checksumFile(self, fileObject):
-        text = "Comparing local checksum of file %s of object %s" % (fileObject['name'], fileObject['parent'])
+        text = "Comparing local checksum of file '%s' of object %s" % (fileObject['name'], fileObject['parent'])
         sys.stdout.write(text)
 
         # calculate the local checksum
@@ -605,7 +605,7 @@ class DownloadManager(object):
         elif 'checksum' in fileObject:
             checksum = fileObject['checksum']
         else:
-            sys.stdout.write("\nwarning: no checksum found in object for file '%s'\n" % fileObject['name'])
+            sys.stdout.write("\nwarning: no checksum found for file '%s' in object %s\n" % (fileObject['name'], fileObject['parent']))
             return False
 
         # compare with retrieved checksum
