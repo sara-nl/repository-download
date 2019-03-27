@@ -14,10 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-try:
-    import sys, os, signal, getopt, requests, inspect, pprint, copy, cchardet, re, time, math, simplejson, subprocess
-except Exception as e:
-    error("%s, please install the module by running the command: pip install %s" % (e.message, e.message.split(' ')[-1]), True)
+import sys, os, getopt
 
 class Config:
     DEBUG = False
@@ -28,7 +25,7 @@ class Config:
     BUFFER_SIZE = 2 * 1024 * 1024
     BASE_URL = 'https://repository.surfsara.nl'
 
-def message(msg, mtype='debug', color=0, showstack=False):
+def message(msg, mtype='debug', color=0, showstack=False, out=sys.stdout):
     ''' Print message'''
 
     if (mtype == 'debug' and not Config.DEBUG) \
@@ -37,23 +34,23 @@ def message(msg, mtype='debug', color=0, showstack=False):
         return
 
     if Config.DEBUG and Config.DEBUG_COLORS:
-        sys.stderr.write("\x1b[%sm" % color)
+        out.write("\x1b[%sm" % color)
 
     if Config.DEBUG:
         frames = inspect.stack()
         try:
-            sys.stderr.write('%% %s():%d : ' % (frames[2][3], frames[2][2]))
+            out.write('%% %s():%d : ' % (frames[2][3], frames[2][2]))
         finally:
             # this breaks reference cycles in Python interpreter
             del frames
 
     if Config.DEBUG_COLORS:
-        sys.stderr.write('\x1b[0m')
+        out.write('\x1b[0m')
 
-    sys.stderr.write("%s\n" % msg)
+    out.write("%s: %s\n" % (mtype, msg))
 
 def error(msg, exitCode=None):
-    message("error: %s" % msg, 'error', 31, True)
+    message("error: %s" % msg, 'error', 31, True, out=sys.stderr)
 
     if not exitCode is None:
         sys.exit(exitCode)
@@ -66,6 +63,11 @@ def notice(msg):
 
 def verbose(msg):
     message(msg, 'verbose', color=33)
+
+try:
+    import signal, requests, inspect, pprint, copy, cchardet, re, time, math, simplejson, subprocess
+except ModuleNotFoundError as e:
+    error("%s found, please install the module by running the command: pip install %s" % (e, str(e).split(' ')[-1].strip('\'')), 1)
 
 SERVICE = "SURF Data Repository"
 TITLE = SERVICE + " download tool"
@@ -146,15 +148,13 @@ class DownloadManager(object):
         self.options = {}
         if not options:
             return
-        for (k,v) in options.items():
+        for k, v in options.items():
             try:
                 index = map(str.lower, dir(self)).index(("set%s" % k).lower())
                 method = getattr(self, dir(self)[index])
                 method(v)
             except Exception as e:
                 self.options.update({k: v})
-
-        print(self.options)
 
     def downloadObjectList(self):
         print("Downloading your %s" % ("basket" if not self.options['favourites'] else "favourites"))
@@ -238,7 +238,7 @@ class DownloadManager(object):
             self.processFavourites()
 
     def processBasket(self):
-        if self.objects is None or len(self.objects) == 0:
+        if not self.objects:
             error('basket is empty', 1)
 
         for b in self.objects:
@@ -247,16 +247,15 @@ class DownloadManager(object):
             self._processObject(pid, b['deposit'], b['fileID'])
 
     def processFavourites(self):
-        if self.objects is None or len(self.objects) == 0:
+        if not self.objects:
             error('favourites list is empty', 1)
-
         for b in self.objects:
             pid = b['object']
 
             self._processObject(pid)
 
     def _processObject(self, pid, deposit=None, fileID=None):
-        if pid in self.cache.keys():
+        if pid in self.cache:
             debug("in cache: %s" % pid)
             objectInfo = self.cache[pid]
         else:
@@ -269,23 +268,27 @@ class DownloadManager(object):
 
             objectInfo = data['result']
 
-        if pid not in self.cache.keys():
+        if pid not in self.cache:
             self.cache[pid] = copy.copy(objectInfo)
 
         if objectInfo['type'] in ['collection', 'deposit']:
             if objectInfo['type'] == 'collection':
-                # process collections
-                for c in objectInfo['collections']:
+                # process collections, limit if optioned
+                objects = objectInfo['collections'][:self.options['max-childs']] if self.options['max-childs'] > 0 else objectInfo['collections']
+                for c in objects:
                     if deposit and c['pid'] != deposit:
                         continue
                     self._processObject(c, deposit)
-                # process deposits
-                for d in objectInfo['deposits']:
+                # process deposits, limit if optioned
+                objects = objectInfo['deposits'][:self.options['max-childs']] if self.options['max-childs'] > 0 else objectInfo['deposits']
+                for d in objects:
                     if deposit and d['pid'] != deposit:
                         continue
                     self._processObject(d, deposit)
             elif objectInfo['type'] == 'deposit':
-                for f in objectInfo['files']:
+                # process deposits, limit if optioned
+                objects = objectInfo['files'][:self.options['max-files']] if self.options['max-files'] > 0 else objectInfo['files']
+                for f in objects:
                     if fileID and f['id'] != fileID:
                         continue
                     if f['status'] in STATUS_OFFLINE:
@@ -306,7 +309,7 @@ class DownloadManager(object):
     def preReport(self):
         counts = {}
         for f in self.files.values():
-            if not f['parent'] in counts.keys():
+            if not f['parent'] in counts:
                 counts[f['parent']] = 0
             counts[f['parent']] += 1
 
@@ -320,26 +323,26 @@ class DownloadManager(object):
 
         counts = {}
         for f in finished:
-            if not f['parent'] in counts.keys():
+            if not f['parent'] in counts:
                 counts[f['parent']] = 0
             counts[f['parent']] += 1
 
         # report if any objects
-        if len(counts) > 0:
+        if counts:
             print("Finished (%d objects, %d files): %s" % (len(counts), sum(i for _,i in counts.items()), ", ".join(map(lambda x: "%s (%s)" % x, counts.items()))))
         else:
-            print("None finished")
+            print("None of objects finished")
 
         errors = filter(lambda x: x['dstatus'] == FileStatus.ERROR, self.files.values())
 
         counts = {}
         for f in errors:
-            if not f['parent'] in counts.keys():
+            if not f['parent'] in counts:
                 counts[f['parent']] = 0
             counts[f['parent']] += 1
 
         # report if any errors
-        if len(counts) > 0:
+        if counts:
             print("Errors (%d objects, %d files): %s" % (len(counts), sum(i for _,i in counts.items()), ", ".join(map(lambda x: "%s (%s)" % x, counts.items()))))
         else:
             print("No errors")
@@ -362,7 +365,7 @@ class DownloadManager(object):
 
     # process all files and objects to be staged
     def _processStaging(self):
-        for (i, f) in enumerate(self.files.itervalues()):
+        for (i, f) in enumerate(self.files.values()):
             if f['dstatus'] == FileStatus.STAGE:
                 # check if deposit has already been staged recently
                 if not 'stage_request' in f:
@@ -406,7 +409,7 @@ class DownloadManager(object):
         return True
 
     def _processDownloads(self):
-        for (i, f) in enumerate(self.files.itervalues()):
+        for (i, f) in enumerate(self.files.values()):
             if f['dstatus'] == FileStatus.STAGING:
                 # check if deposit has already been checked for status recently
                 if not 'status_request' in f:
@@ -419,14 +422,14 @@ class DownloadManager(object):
                     f['dstatus'] = FileStatus.ERROR
             elif f['dstatus'] == FileStatus.DOWNLOAD:
                 if self._downloadFile(f):
-                    f['dstatus'] = FileStatus.CHECKSUM if not self.options['skip-checksum'] else FileStatus.SKIP
+                    f['dstatus'] = FileStatus.CHECKSUM if not self.options['skip-checksum'] else FileStatus.FINISHED
                 else:
                     f['dstatus'] = FileStatus.ERROR
 
         return True
 
     def _processChecksums(self):
-        for (i, f) in enumerate(self.files.itervalues()):
+        for (i, f) in enumerate(self.files.values()):
             if f['dstatus'] == FileStatus.CHECKSUM:
                 if self._checksumFile(f):
                     f['dstatus'] = FileStatus.FINISHED
@@ -559,7 +562,7 @@ class DownloadManager(object):
             with open(fileObject['target'], mode) as fout:
                 fout.seek(localfilesize, os.SEEK_SET)
 
-                start = time.clock()
+                start = time.process_time()
                 for chunk in self.request.iter_content(chunk_size=Config.BUFFER_SIZE):
                     if chunk:
                         size = len(chunk)
@@ -569,15 +572,15 @@ class DownloadManager(object):
 
                     # print progress
                     percentage = totsize * 100. / int(fileObject['size'])
-                    progress = "(%d%% of %s, %s/s, %d%% of %s)" % (percentage, bytesize(int(fileObject['size'])), bytesize(int(downsize / (time.clock() - start))), (self.report['bytes-downloaded'] * 100. / int(self.report['total-download-size'])), bytesize(self.report['total-download-size'])) if filesize else ""
+                    self.report['bytes-downloaded'] += size
+                    progress = "(%d%% of %s, %s/s, %d%% of %s)" % (percentage, bytesize(int(fileObject['size'])), bytesize(int(downsize / (time.process_time() - start))), (self.report['bytes-downloaded'] * 100. / int(self.report['total-download-size'])), bytesize(self.report['total-download-size'])) if filesize else ""
+
                     if totsize == filesize or (self.options['test'] and percentage > 1):
                         sys.stdout.write("\rFile %s of %s downloaded %s" % (fileObject['name'], fileObject['parent'], progress))
                         break
                     else:
                         sys.stdout.write("\rDownloading file %s of %s %s" % (fileObject['name'], fileObject['parent'], progress))
                     sys.stdout.flush()
-
-                    self.report['bytes-downloaded'] += size
 
                 sys.stdout.write('\n')
         except Exception as e:
@@ -596,11 +599,20 @@ class DownloadManager(object):
         except subprocess.CalledProcessError as e:
             error(e, 102)
 
+        # locate checksum
+        if 'md5' in fileObject:
+            checksum = fileObject['md5']
+        elif 'checksum' in fileObject:
+            checksum = fileObject['checksum']
+        else:
+            sys.stdout.write("\nwarning: no checksum found in object for file '%s'\n" % fileObject['name'])
+            return False
+
         # compare with retrieved checksum
-        if output == fileObject['md5']:
+        if output == checksum:
             sys.stdout.write("\r" + text + " PASS")
         else:
-            sys.stdout.write("\n FAIL (%s (local) vs %s (remote))" % (output, fileObject['md5']))
+            sys.stdout.write("\n FAIL (%s (local) vs %s (remote))" % (output, checksum))
 
         # store checksum if requested
         if self.options['store-checksum']:
@@ -618,10 +630,16 @@ def signalHandler(signal, frame):
 def bools(b):
     return "yes" if b else "no"
 
-def usage(options):
+def allorn(d):
+    return "all" if not d else str(d)
+
+def usage():
+    print("usage: %s [options] token" % sys.argv[0])
+
+def help(options):
     """ Show usage information """
     print("%s v%s: massively download collections, deposits and individual files from the %s\n" % (TITLE, VERSION, SERVICE))
-    print("Syntax: %s [options] token" % sys.argv[0])
+    usage()
     print("\nwhere token is your personal API access token. If you do not have an API token yet, create one on the %s website." % SERVICE)
     print("\nOptions:")
     print("--target          -t  set the target instance of %s (default: '%s')" % (SERVICE, Config.BASE_URL))
@@ -634,7 +652,8 @@ def usage(options):
     print("--skip-checksum       skip checksum check after download (default: %s)" %  bools(options['skip-checksum']))
     print("--no-resume           do not resume partially downloaded files, redownload instead (default: %s)" % bools(options['no-resume']))
     print("--store-checksum      store generated checksum after download (default: %s)" % bools(options['store-checksum']))
-    print("--max-childs      -m  maximum number of collection childs to process (default: ")
+    print("--max-childs      -m  maximum number of childs to process per collection (default: %d" % allorn(options['max-childs']))
+    print("--max-files           maximum number of files to download per deposit (default: %d" % allorn(options['max-files']))
     print("--no-verify       -k  do not verify server certificate (default: %s)" % bools(options['no-verify']))
     print("--debug           -d  set debuglevel to max (default: %s)" % bools(Config.DEBUG))
     print("--test                test mode, limits data downloads (default: %s)" % bools(options['test']))
@@ -659,6 +678,7 @@ def main(argv):
         'stage-max-count': 10,
         'outputdir': "download",
         'max-childs': 0,
+        'max-files': 0,
         'target': Config.BASE_URL,
         'test': False,
         'no-verify': False
@@ -669,13 +689,13 @@ def main(argv):
         opts, args = getopt.gnu_getopt(argv, "hdb:vo:t:nkm:",  \
             ["help", "version", "debug", "verbose", "output=", "target=", "no-verify", "favourites", "skip-checksum", "store-checksum",
              "buffer-size=", "dry-run", "no-resume", "force-overwrite", "skip-download", "skip-staging", "test",
-             "max-childs="])
+             "max-childs=", "max-files="])
     except getopt.GetoptError as err:
         error(err, 1)
 
     if not args and not ('-h' in opts or '--help' in opts):
-        error("missing token", 1)
-        usage(options)
+        error("missing token")
+        usage()
         sys.exit(1)
 
     # parse other
@@ -688,15 +708,19 @@ def main(argv):
             sys.exit(1)
         elif opt in ["--no-verify", "--skip-checksum", "--store-checksum", "--skip-download", "--skip-staging", "--no-resume", "--force-overwrite", "--favourites", "--test"]:
             options.update({opt[2:]: True})
+        elif opt in ["-m", "--max-childs"]:
+            options.update({'max-childs': int(arg)})
+        elif opt in ["--max-files"]:
+            options.update({'max-files': int(arg)})
         elif opt in ["-k"]:
-            options.update({"no-verify": True})
+            options.update({'no-verify': True})
         elif opt in ["-d", "--debug"]:
             Config.DEBUG = True
         elif opt in ["-n", "--dry-run"]:
             Config.DRYRUN = True
         elif opt in ["-v", "--verbose"]:
             Config.VERBOSE = True
-        elif opt in ["-m", "--buffer-size"]:
+        elif opt in ["-b", "--buffer-size"]:
             Config.BUFFER_SIZE = int(arg)
         elif opt in ["-o", "--output"]:
             options.update({'outputdir': arg})
