@@ -22,8 +22,6 @@ class Config:
     VERBOSE = False
     QUIET = False
     DRYRUN = False
-    BUFFER_SIZE = 2 * 1024 * 1024
-    BASE_URL = 'https://repository.surfsara.nl'
 
 def message(msg, mtype='debug', color=0, showstack=False, out=sys.stdout):
     ''' Print message'''
@@ -52,7 +50,7 @@ def message(msg, mtype='debug', color=0, showstack=False, out=sys.stdout):
     out.write("%s\n" % msg)
 
 def error(msg, exitCode=None):
-    message("error: %s" % msg, 'error', 31, True, out=sys.stderr)
+    message("%s" % msg, 'error', 31, True, out=sys.stderr)
 
     if not exitCode is None:
         sys.exit(exitCode)
@@ -194,7 +192,7 @@ class DownloadManager(object):
 
         try:
             self.request = requests.request(method, url, headers=headers, params=params, verify=not self.options['no-verify'], timeout=self.options['request-timeout'])
-        except requests.exceptions.ReadTimeout as e:
+        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectTimeout) as e:
             error("request time out after %d seconds" % self.options['request-timeout'], 2)
         except requests.exceptions.SSLError as e:
             error(e, 2)
@@ -222,8 +220,8 @@ class DownloadManager(object):
 
         if self.request.status_code == 200:
             return self.rdata
-        elif self.request.status_code == 401:
-            error("could not authenticate using token", 2)
+        elif self.request.status_code in [401, 403]:
+            error("could not authenticate using token '%s'" % params['token'], 2)
         elif self.request.status_code >= 300:
             error("request failed: %s %s" % (self.request.status_code, self.request.reason), 2)
         elif self.rdata is dict and "error" in self.rdata:
@@ -642,7 +640,7 @@ def help(options):
     usage()
     print("\nwhere token is your personal API access token. If you do not have an API token yet, create one on the %s website." % SERVICE)
     print("\nOptions:")
-    print("--target          -t  set the target instance of %s (default: '%s')" % (SERVICE, Config.BASE_URL))
+    print("--target          -t  set the target instance of %s (default: '%s')" % (SERVICE, options['target']))
     print("--favourites          download favourites instead of basket (default: %s)" % bools(options['favourites']))
     print("--output          -o  set target download directory (default: '%s')" % options['outputdir'])
     print("--buffer-size     -b  set download buffer size (bytes, default: %d)" % Config.BUFFER_SIZE)
@@ -652,8 +650,8 @@ def help(options):
     print("--skip-checksum       skip checksum check after download (default: %s)" %  bools(options['skip-checksum']))
     print("--no-resume           do not resume partially downloaded files, redownload instead (default: %s)" % bools(options['no-resume']))
     print("--store-checksum      store generated checksum after download (default: %s)" % bools(options['store-checksum']))
-    print("--max-childs      -m  maximum number of childs to process per collection (default: %d" % allorn(options['max-childs']))
-    print("--max-files           maximum number of files to download per deposit (default: %d" % allorn(options['max-files']))
+    print("--max-childs      -m  maximum number of childs to process per collection (default: %s)" % allorn(options['max-childs']))
+    print("--max-files           maximum number of files to download per deposit (default: %s)" % allorn(options['max-files']))
     print("--no-verify       -k  do not verify server certificate (default: %s)" % bools(options['no-verify']))
     print("--debug           -d  set debuglevel to max (default: %s)" % bools(Config.DEBUG))
     print("--test                test mode, limits data downloads (default: %s)" % bools(options['test']))
@@ -672,14 +670,15 @@ def main(argv):
         'skip-checksum': False,
         'no-resume': False,
         'favourites': False,
-        'request-timeout': 30,
+        'request-timeout': 15,
         'status-interval': 30,
         'stage-interval': 10,
         'stage-max-count': 10,
+        'buffer-size': 2 * 1024 * 1024,
         'outputdir': "download",
         'max-childs': 0,
         'max-files': 0,
-        'target': Config.BASE_URL,
+        'target': "https://repository.surfsara.nl",
         'test': False,
         'no-verify': False
     }
@@ -693,7 +692,7 @@ def main(argv):
     except getopt.GetoptError as err:
         error(err, 1)
 
-    if not args and not ('-h' in opts or '--help' in opts):
+    if not args and len(set(sum(opts, ())).intersection(set(['-h', '--help']))) == 0:
         error("missing token")
         usage()
         sys.exit(1)
@@ -701,7 +700,7 @@ def main(argv):
     # parse other
     for opt, arg in opts:
         if opt in ["-h", "--help"]:
-            usage()
+            help(options)
             sys.exit()
         elif opt == "--version":
             print("%s %s" % (TITLE, VERSION))
@@ -721,10 +720,12 @@ def main(argv):
         elif opt in ["-v", "--verbose"]:
             Config.VERBOSE = True
         elif opt in ["-b", "--buffer-size"]:
-            Config.BUFFER_SIZE = int(arg)
+            options.update({'buffer-size', int(arg)})
         elif opt in ["-o", "--output"]:
             options.update({'outputdir': arg})
         elif opt in ["-t", "--target"]:
+            if not re.match(r"https?:\/\/[a-z0-9\.\-]{4,}", arg):
+                error('invalid target: %s' % arg, 1)
             options.update({'target': arg})
 
     # allow graceful exit on interrupt
