@@ -21,9 +21,8 @@ class Config:
     DEBUG_COLORS = True
     VERBOSE = False
     QUIET = False
-    DRYRUN = False
 
-def message(msg, mtype='debug', color=0, showstack=False, out=sys.stdout):
+def message(msg, mtype=None, color=37, showstack=False, out=sys.stdout, addNewLine=True):
     ''' Print message'''
 
     if (mtype == 'debug' and not Config.DEBUG) \
@@ -37,17 +36,19 @@ def message(msg, mtype='debug', color=0, showstack=False, out=sys.stdout):
     if Config.DEBUG:
         frames = inspect.stack()
         try:
-            out.write('%% %s():%d : ' % (frames[2][3], frames[2][2]))
+            out.write('%% %s():%d: ' % (frames[2][3], frames[2][2]))
         finally:
             # this breaks reference cycles in Python interpreter
             del frames
-    else:
+    elif mtype is not None:
         out.write("%s: " % mtype)
 
     if Config.DEBUG_COLORS:
         out.write('\x1b[0m')
 
-    out.write("%s\n" % msg)
+    out.write("%s" % msg)
+    if addNewLine:
+        out.write("\n")
 
 def error(msg, exitCode=None):
     message("%s" % msg, 'error', 31, True, out=sys.stderr)
@@ -56,13 +57,16 @@ def error(msg, exitCode=None):
         sys.exit(exitCode)
 
 def debug(msg):
-    message(msg, color=32)
+    message(msg, 'debug', color=32)
 
 def note(msg):
-    message(msg, 'note', color=30)
+    message(msg, 'note', color=36)
 
 def verbose(msg):
     message(msg, 'verbose', color=33)
+
+def warning(msg):
+    message(msg, 'warning', color=31)
 
 try:
     import signal, requests, inspect, pprint, copy, cchardet, re, time, math, simplejson, subprocess
@@ -71,15 +75,15 @@ except ModuleNotFoundError as e:
 
 SERVICE = "SURF Data Repository"
 TITLE = SERVICE + " download tool"
-VERSION = "1.0-beta-2"
+VERSION = "1.0-beta-3"
 
-TDR_API_BASKET = 'api/basket'
-TDR_API_FAVOURITES = 'api/favourites'
+TDR_API = 'api'
 TDR_API_OBJECTS = 'api/objects/%s'
 TDR_API_STATUS = 'api/objects/%s/%s/status'
 TDR_API_STAGE = 'api/objects/%s/%s/stage'
 TDR_API_STAGE_FILE = 'api/objects/%s/%s/stage/%s'
 
+VALID_SOURCES = ['basket', 'favourites']
 STATUS_ONLINE = ['REG', 'DUL']
 STATUS_OFFLINE = ['OFL', 'MIG']
 STATUS_STAGING = ['UNM']
@@ -155,12 +159,11 @@ class DownloadManager(object):
                 self.options.update({k: v})
 
     def downloadObjectList(self):
-        print("Downloading your %s" % ("basket" if not self.options['favourites'] else "favourites"))
-        if not self.options['favourites']:
-            data = self._requestAuthenticated('GET', TDR_API_BASKET)
-        else:
-            data = self._requestAuthenticated('GET', TDR_API_FAVOURITES)
+        if self.options['source'] not in VALID_SOURCES:
+            error("invalid source '%s'" % self.options['source'])
+        message("Downloading your %s" % self.options['source'])
 
+        data = self._requestAuthenticated('GET', "%s/%s" % (TDR_API, self.options['source']))
         self.objects = data['result']
 
         verbose(self.objects)
@@ -230,34 +233,20 @@ class DownloadManager(object):
             return None
 
     def processObjectList(self):
-        if not self.options['favourites']:
-            self.processBasket()
-        else:
-            self.processFavourites()
-
-    def processBasket(self):
         if not self.objects:
-            error('basket is empty', 1)
+            error("%s is empty" % self.options['source'], 1)
 
         for b in self.objects:
             pid = b['object']
 
-            self._processObject(pid, b['deposit'], b['fileID'])
-
-    def processFavourites(self):
-        if not self.objects:
-            error('favourites list is empty', 1)
-        for b in self.objects:
-            pid = b['object']
-
-            self._processObject(pid)
+            self._processObject(pid, b.get('deposit', None), b.get('fileID', None))
 
     def _processObject(self, pid, deposit=None, fileID=None):
         if pid in self.cache:
             debug("in cache: %s" % pid)
             objectInfo = self.cache[pid]
         else:
-            print("Processing %s" % pid)
+            message("Processing %s" % pid)
 
             data = self._request(TDR_API_OBJECTS % pid.replace(':', '/'))
 
@@ -299,7 +288,7 @@ class DownloadManager(object):
                     self.files[f['url']] = f
 
         else:
-            print("Skipping %s" % pid)
+            message("Skipping %s" % pid)
 
         return True
 
@@ -313,10 +302,13 @@ class DownloadManager(object):
 
         self.report['total-download-size'] = sum(int(i['size']) for _,i in self.files.items())
 
-        print("Total download size: %s in %d files (%d objects)" % (bytesize(self.report['total-download-size']), len(self.files.values()), len(counts)))
+        message("Total download size: %s in %d files (%d objects)" % (bytesize(self.report['total-download-size']), len(self.files.values()), len(counts)))
 
     # report after processes are completed
     def postReport(self):
+        if not self.files:
+            return
+
         finished = filter(lambda x: x['dstatus'] == FileStatus.FINISHED, self.files.values())
 
         counts = {}
@@ -327,9 +319,9 @@ class DownloadManager(object):
 
         # report if any objects
         if counts:
-            print("Finished (%d objects, %d files): %s" % (len(counts), sum(i for _,i in counts.items()), ", ".join(map(lambda x: "%s (%s)" % x, counts.items()))))
+            message("Finished (%d objects, %d files): %s" % (len(counts), sum(i for _,i in counts.items()), ", ".join(map(lambda x: "%s (%s)" % x, counts.items()))))
         else:
-            print("None of objects finished")
+            message("None of objects finished")
 
         errors = filter(lambda x: x['dstatus'] == FileStatus.ERROR, self.files.values())
 
@@ -341,9 +333,9 @@ class DownloadManager(object):
 
         # report if any errors
         if counts:
-            print("Errors (%d objects, %d files): %s" % (len(counts), sum(i for _,i in counts.items()), ", ".join(map(lambda x: "%s (%s)" % x, counts.items()))))
+            message("Errors (%d objects, %d files): %s" % (len(counts), sum(i for _,i in counts.items()), ", ".join(map(lambda x: "%s (%s)" % x, counts.items()))))
         else:
-            print("No errors")
+            message("No errors")
 
     # initiate download and stage processes
     def startProcesses(self):
@@ -441,7 +433,7 @@ class DownloadManager(object):
             debug('maximum number of stage requests exceeded')
             return False
 
-        print('Staging object %s' % pid)
+        message('Staging object %s' % pid)
 
         success = self._requestStage(pid)
 
@@ -457,7 +449,7 @@ class DownloadManager(object):
         return True
 
     def _stageDepositFile(self, fileObject):
-        print("Staging file '%s' of object %s" % (fileObject['name'], fileObject['parent']))
+        message("Staging file '%s' of object %s" % (fileObject['name'], fileObject['parent']))
 
         success = self._requestStage(fileObject['parent'], fileObject['id'])
 
@@ -473,7 +465,7 @@ class DownloadManager(object):
         return True
 
     def _statusDeposit(self, pid):
-        print('Status %s' % pid)
+        message('Status %s' % pid)
 
         success = self._requestStatus(pid)
 
@@ -489,7 +481,7 @@ class DownloadManager(object):
         return True
 
     def _statusDepositFile(self, fileObject):
-        print("Status file '%s' of object %s" % (fileObject['name'], fileObject['parent']))
+        message("Status file '%s' of object %s" % (fileObject['name'], fileObject['parent']))
 
         success = self._requestStatus(fileObject['parent'], fileObject['id'])
 
@@ -524,7 +516,7 @@ class DownloadManager(object):
             self.report['bytes-downloaded'] += localfilesize
 
             if localfilesize == int(fileObject['size']):
-                print("File '%s' of object %s already downloaded" % (fileObject['name'], fileObject['parent']))
+                message("File '%s' of object %s already downloaded" % (fileObject['name'], fileObject['parent']))
                 return True
             elif not self.options['no-resume'] and localfilesize > 0:
                 debug("Resuming download of file '%s' of object %s at byte offset %d" % (fileObject['name'], fileObject['parent'], localfilesize))
@@ -561,7 +553,7 @@ class DownloadManager(object):
                 fout.seek(localfilesize, os.SEEK_SET)
 
                 start = time.process_time()
-                for chunk in self.request.iter_content(chunk_size=Config.BUFFER_SIZE):
+                for chunk in self.request.iter_content(chunk_size=self.options['buffer-size']):
                     if chunk:
                         size = len(chunk)
                         downsize += size
@@ -574,13 +566,12 @@ class DownloadManager(object):
                     progress = "(%d%% of %s, %s/s, %d%% of %s)" % (percentage, bytesize(int(fileObject['size'])), bytesize(int(downsize / (time.process_time() - start))), (self.report['bytes-downloaded'] * 100. / int(self.report['total-download-size'])), bytesize(self.report['total-download-size'])) if filesize else ""
 
                     if totsize == filesize or (self.options['test'] and percentage > 1):
-                        sys.stdout.write("\rFile '%s' of object %s downloaded %s" % (fileObject['name'], fileObject['parent'], progress))
+                        message("\rFile '%s' of object %s downloaded %s" % (fileObject['name'], fileObject['parent'], progress))
                         break
                     else:
-                        sys.stdout.write("\rDownloading file '%s' of object %s %s" % (fileObject['name'], fileObject['parent'], progress))
+                        message("\rDownloading file '%s' of object %s %s" % (fileObject['name'], fileObject['parent'], progress), addNewLine=False)
                     sys.stdout.flush()
 
-                sys.stdout.write('\n')
         except Exception as e:
             error(e, 3)
 
@@ -589,7 +580,7 @@ class DownloadManager(object):
     # check the checksum of a downloaded file
     def _checksumFile(self, fileObject):
         text = "Comparing local checksum of file '%s' of object %s" % (fileObject['name'], fileObject['parent'])
-        sys.stdout.write(text)
+        message(text, addNewLine=False)
 
         # calculate the local checksum
         try:
@@ -603,22 +594,20 @@ class DownloadManager(object):
         elif 'checksum' in fileObject:
             checksum = fileObject['checksum']
         else:
-            sys.stdout.write("\nwarning: no checksum found for file '%s' in object %s\n" % (fileObject['name'], fileObject['parent']))
+            message("\nwarning: no checksum found for file '%s' in object %s" % (fileObject['name'], fileObject['parent']))
             return False
 
         # compare with retrieved checksum
         if output == checksum:
-            sys.stdout.write("\r" + text + " PASS")
+            message("\r" + text + " PASS")
         else:
-            sys.stdout.write("\n FAIL (%s (local) vs %s (remote))" % (output, checksum))
+            message("\n FAIL (%s (local) vs %s (remote))" % (output, checksum))
 
         # store checksum if requested
         if self.options['store-checksum']:
             with open("%s.md5" % fileObject['target'], 'w') as f:
                 f.write(output)
                 f.close()
-
-        sys.stdout.write('\n')
 
         return output == fileObject['md5']
 
@@ -641,9 +630,9 @@ def help(options):
     print("\nwhere token is your personal API access token. If you do not have an API token yet, create one on the %s website." % SERVICE)
     print("\nOptions:")
     print("--target          -t  set the target instance of %s (default: '%s')" % (SERVICE, options['target']))
-    print("--favourites          download favourites instead of basket (default: %s)" % bools(options['favourites']))
+    print("--source              specify source (default: %s)" % options['source'])
     print("--output          -o  set target download directory (default: '%s')" % options['outputdir'])
-    print("--buffer-size     -b  set download buffer size (bytes, default: %d)" % Config.BUFFER_SIZE)
+    print("--buffer-size     -b  set download buffer size (bytes, default: %d)" % options['buffer-size'])
     print("--force-overwrite     force overwrite of existing files (default: %s)" % bools(options['force-overwrite']))
     print("--skip-staging        skip staging of objects (default: %s)" % bools(options['skip-staging']))
     print("--skip-download       skip downloading of files (default: %s)" % bools(options['skip-download']))
@@ -655,7 +644,8 @@ def help(options):
     print("--no-verify       -k  do not verify server certificate (default: %s)" % bools(options['no-verify']))
     print("--debug           -d  set debuglevel to max (default: %s)" % bools(Config.DEBUG))
     print("--test                test mode, limits data downloads (default: %s)" % bools(options['test']))
-    print("--dry-run         -n  dry-run mode, simulate staging, downloads and further processing (default: %s)" % bools(Config.DRYRUN))
+    print("--dry-run         -n  dry-run mode, simulate staging, downloads and further processing (default: %s)" % bools(self.options['dry-run']))
+    print("--quiet           -q  quiet mode, no output at all (default: %s)" % bools(Config.QUIET))
     print("--version             prints '%s %s'" % (TITLE, VERSION))
     print("--help            -h  help mode")
     print("                  -v  verbose mode")
@@ -669,7 +659,7 @@ def main(argv):
         'skip-download': False,
         'skip-checksum': False,
         'no-resume': False,
-        'favourites': False,
+        'source': "basket",
         'request-timeout': 15,
         'status-interval': 30,
         'stage-interval': 10,
@@ -680,14 +670,15 @@ def main(argv):
         'max-files': 0,
         'target': "https://repository.surfsara.nl",
         'test': False,
-        'no-verify': False
+        'no-verify': False,
+        'dry-run': False
     }
 
     # handle arguments
     try:
-        opts, args = getopt.gnu_getopt(argv, "hdb:vo:t:nkm:",  \
-            ["help", "version", "debug", "verbose", "output=", "target=", "no-verify", "favourites", "skip-checksum", "store-checksum",
-             "buffer-size=", "dry-run", "no-resume", "force-overwrite", "skip-download", "skip-staging", "test",
+        opts, args = getopt.gnu_getopt(argv, "hdqb:vo:t:nkm:s:",  \
+            ["help", "version", "debug", "verbose", "quiet", "output=", "target=", "no-verify", "favourites", "skip-checksum", "store-checksum",
+             "buffer-size=", "dry-run", "no-resume", "force-overwrite", "skip-download", "skip-staging", "test", "source=",
              "max-childs=", "max-files="])
     except getopt.GetoptError as err:
         error(err, 1)
@@ -705,20 +696,26 @@ def main(argv):
         elif opt == "--version":
             print("%s %s" % (TITLE, VERSION))
             sys.exit(1)
-        elif opt in ["--no-verify", "--skip-checksum", "--store-checksum", "--skip-download", "--skip-staging", "--no-resume", "--force-overwrite", "--favourites", "--test"]:
+        elif opt in ["--no-verify", "--skip-checksum", "--store-checksum", "--skip-download", "--skip-staging", "--no-resume", "--force-overwrite", "--test"]:
             options.update({opt[2:]: True})
         elif opt in ["-m", "--max-childs"]:
             options.update({'max-childs': int(arg)})
         elif opt in ["--max-files"]:
             options.update({'max-files': int(arg)})
+        elif opt in ["--source"]:
+            options.update({"source": arg})
+        elif opt in ["--favourites", "--basket"]:
+            options.update({"source": opt[2:]})
         elif opt in ["-k"]:
             options.update({'no-verify': True})
         elif opt in ["-d", "--debug"]:
             Config.DEBUG = True
         elif opt in ["-n", "--dry-run"]:
-            Config.DRYRUN = True
+            options.update({'dry-run': True})
         elif opt in ["-v", "--verbose"]:
             Config.VERBOSE = True
+        elif opt in ["-q", "--quiet"]:
+            Config.QUIET = True
         elif opt in ["-b", "--buffer-size"]:
             options.update({'buffer-size', int(arg)})
         elif opt in ["-o", "--output"]:
