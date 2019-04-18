@@ -13,6 +13,13 @@ Download the latest release and make sure all required Python packages are insta
 pip install -r requirements.txt
 ```
 
+### Help
+Show all available options and general usage instructions:
+
+```sh
+./repository-download.py -h
+```
+
 ### General usage
 
 ```sh
