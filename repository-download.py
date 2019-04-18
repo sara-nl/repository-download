@@ -644,7 +644,7 @@ def help(options):
     print("--no-verify       -k  do not verify server certificate (default: %s)" % bools(options['no-verify']))
     print("--debug           -d  set debuglevel to max (default: %s)" % bools(Config.DEBUG))
     print("--test                test mode, limits data downloads (default: %s)" % bools(options['test']))
-    print("--dry-run         -n  dry-run mode, simulate staging, downloads and further processing (default: %s)" % bools(self.options['dry-run']))
+    print("--dry-run         -n  dry-run mode, simulate staging, downloads and further processing (default: %s)" % bools(options['dry-run']))
     print("--quiet           -q  quiet mode, no output at all (default: %s)" % bools(Config.QUIET))
     print("--version             prints '%s %s'" % (TITLE, VERSION))
     print("--help            -h  help mode")
