@@ -585,7 +585,7 @@ class DownloadManager(object):
 
         # calculate the local checksum
         try:
-            output = subprocess.check_output("md5sum %s | awk '{print $1}'" % (fileObject['target']), shell=True).strip()
+            output = subprocess.check_output("md5sum %s | awk '{print $1}'" % (fileObject['target']), shell=True).strip().decode()
         except subprocess.CalledProcessError as e:
             error(e, 102)
 
