@@ -158,10 +158,12 @@ class DownloadManager(object):
             except Exception as e:
                 self.options.update({k: v})
 
+        debug("target: %s" % self.options['target'])
+
     def downloadObjectList(self):
         if self.options['source'] not in VALID_SOURCES:
             error("invalid source '%s'" % self.options['source'])
-        message("Downloading your %s" % self.options['source'])
+        message("Downloading your %s from %s" % (self.options['source'], self.options['target']))
 
         data = self._requestAuthenticated('GET', "%s/%s" % (TDR_API, self.options['source']))
         self.objects = data['result']
