@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import sys, os, getopt
+import sys, os, getopt, timeit
 
 class Config:
     DEBUG = False
@@ -75,7 +75,7 @@ except ModuleNotFoundError as e:
 
 SERVICE = "SURF Data Repository"
 TITLE = SERVICE + " download tool"
-VERSION = "1.0-beta-3"
+VERSION = "1.0-beta-4"
 
 TDR_API = 'api'
 TDR_API_OBJECTS = 'api/objects/%s'
@@ -552,7 +552,7 @@ class DownloadManager(object):
             with open(fileObject['target'], mode) as fout:
                 fout.seek(localfilesize, os.SEEK_SET)
 
-                start = time.process_time()
+                start = timeit.default_timer()
                 for chunk in self.request.iter_content(chunk_size=self.options['buffer-size']):
                     if chunk:
                         size = len(chunk)
@@ -563,7 +563,7 @@ class DownloadManager(object):
                     # print progress
                     percentage = totsize * 100. / int(fileObject['size'])
                     self.report['bytes-downloaded'] += size
-                    progress = "(%d%% of %s, %s/s, %d%% of %s)" % (percentage, bytesize(int(fileObject['size'])), bytesize(int(downsize / (time.process_time() - start))), (self.report['bytes-downloaded'] * 100. / int(self.report['total-download-size'])), bytesize(self.report['total-download-size'])) if filesize else ""
+                    progress = "(%d%% of %s, %s/s, %d%% of %s)" % (percentage, bytesize(int(fileObject['size'])), bytesize(int(size / (timeit.default_timer() - start))), (self.report['bytes-downloaded'] * 100. / int(self.report['total-download-size'])), bytesize(self.report['total-download-size'])) if filesize else ""
 
                     if totsize == filesize or (self.options['test'] and percentage > 1):
                         message("\rFile '%s' of object %s downloaded %s" % (fileObject['name'], fileObject['parent'], progress))
@@ -571,6 +571,7 @@ class DownloadManager(object):
                     else:
                         message("\rDownloading file '%s' of object %s %s" % (fileObject['name'], fileObject['parent'], progress), addNewLine=False)
                     sys.stdout.flush()
+                    start = timeit.default_timer()
 
         except Exception as e:
             error(e, 3)
@@ -664,7 +665,7 @@ def main(argv):
         'status-interval': 30,
         'stage-interval': 10,
         'stage-max-count': 10,
-        'buffer-size': 2 * 1024 * 1024,
+        'buffer-size': 1024 * 1024,
         'outputdir': "download",
         'max-childs': 0,
         'max-files': 0,
