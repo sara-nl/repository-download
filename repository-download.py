@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import sys, os, getopt, timeit
+import sys, os, getopt
 
 class Config:
     DEBUG = False
@@ -69,7 +69,7 @@ def warning(msg):
     message(msg, 'warning', color=31)
 
 try:
-    import signal, requests, inspect, pprint, copy, cchardet, re, time, math, simplejson, subprocess
+    import signal, requests, inspect, copy, cchardet, re, math, simplejson, subprocess, timeit
 except ModuleNotFoundError as e:
     error("%s found, please install the module by running the command: pip install %s" % (e, str(e).split(' ')[-1].strip('\'')), 1)
 
