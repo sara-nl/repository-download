@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import sys, os, getopt
+import sys, os, getopt, time
 
 class Config:
     DEBUG = False
@@ -75,7 +75,7 @@ except ModuleNotFoundError as e:
 
 SERVICE = "SURF Data Repository"
 TITLE = SERVICE + " download tool"
-VERSION = "1.0-beta-4"
+VERSION = "1.0.1"
 
 TDR_API = 'api'
 TDR_API_OBJECTS = 'api/objects/%s'
